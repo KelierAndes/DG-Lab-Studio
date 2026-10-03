@@ -1,0 +1,52 @@
+# DGStudio 依赖精确版本（开发/构建环境快照，pip 可直接安装）。
+# 核心运行依赖以 requirements.txt 为准；模块依赖由各模块
+# META["dependencies"] 声明、安装时按需 pip 补装（见下方注释分区）。
+
+# ---- 核心运行依赖 ----
+bleak==3.0.2
+pillow==12.3.0
+pyyaml==6.0.3
+qrcode==8.2
+websockets==17.1
+typing_extensions==4.16.0
+win32more==0.8.1
+win32more-appsdk==0.8.3
+win32more-core==0.8.7
+win32more-Microsoft.Graphics.Win2D==0.8.1.4.0
+win32more-Microsoft.Web.WebView2==0.8.1.0.4191.47
+win32more-Microsoft.Windows.SDK.Contracts==0.8.10.0.28000.2705
+win32more-Microsoft.Windows.SDK.Win32Metadata==0.8.71.0.26
+win32more-Microsoft.Windows.WDK.Win32Metadata==0.8.0.13.25
+win32more-Microsoft.WindowsAppSDK==0.8.2.5.1
+winrt-runtime==3.2.1
+winrt-Windows.Devices.Bluetooth==3.2.1
+winrt-Windows.Devices.Bluetooth.Advertisement==3.2.1
+winrt-Windows.Devices.Bluetooth.GenericAttributeProfile==3.2.1
+winrt-Windows.Devices.Enumeration==3.2.1
+winrt-Windows.Devices.Radios==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.Storage.Streams==3.2.1
+
+# ---- 打包工具（build_exe.py / PyInstaller）----
+altgraph==0.17.5
+colorama==0.4.6
+packaging==26.3
+pefile==2024.8.26
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.7
+pywin32-ctypes==0.2.3
+setuptools==84.0.0
+
+# ---- 模块依赖（已随模块外置，开发模块时才需要；requirements.txt 见各模块仓库）----
+numpy==2.5.3
+opencv-python-headless==5.0.0.93
+python-osc==1.10.2
+# 画面识别模块的可选 OCR 增强（rapidocr 本体 --no-deps 安装，其余单独装）：
+#   pip install --no-deps rapidocr-onnxruntime==1.4.4
+rapidocr-onnxruntime==1.4.4
+onnxruntime==1.19.2
+pyclipper==1.4.0
+shapely==2.1.2
+six==1.17.0
+tqdm==4.70.1

@@ -1,0 +1,10 @@
+# DGStudio 核心运行依赖（软件主体仅含必要依赖）。
+# 联动模块所需的第三方依赖由各模块仓库的 requirements.txt 声明
+# （模块仓库见 https://github.com/KelierAndes/dgstudio-modules-market 汇总的市场清单），
+# 在「模块」页安装模块时自动读取并 pip 补装，不再随核心预装。
+bleak>=3.0
+websockets>=12
+qrcode>=8
+pillow>=10
+win32more>=0.8
+pyyaml>=6

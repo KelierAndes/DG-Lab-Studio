@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <Window.SystemBackdrop>
+    <MicaBackdrop Kind="BaseAlt" />
+  </Window.SystemBackdrop>
+
+  <Grid x:Name="RootGrid" RequestedTheme="Dark">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="48" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <Grid x:Name="TitleBarRoot" Grid.Row="0">
+      <Grid x:Name="TitleDragArea">
+        <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0,0,0" VerticalAlignment="Center">
+          <Border Width="16" Height="16" CornerRadius="4">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#48C8FF" Offset="0" />
+                <GradientStop Color="#0D5FD6" Offset="1" />
+              </LinearGradientBrush>
+            </Border.Background>
+            <FontIcon Glyph="&#xE703;" FontSize="9" Foreground="White" />
+          </Border>
+          <TextBlock
+              Text="DGStudio"
+              FontSize="12"
+              VerticalAlignment="Center"
+              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+      </Grid>
+    </Grid>
+
+    <NavigationView
+        x:Name="NavView"
+        Grid.Row="1"
+        IsBackButtonVisible="Collapsed"
+        IsBackEnabled="False"
+        IsSettingsVisible="False"
+        IsPaneToggleButtonVisible="True"
+        CompactPaneLength="56"
+        OpenPaneLength="248"
+        PaneDisplayMode="Left"
+        SelectionChanged="NavView_SelectionChanged"
+        ItemInvoked="NavView_ItemInvoked">
+      <ContentControl
+          x:Name="ShellHost"
+          HorizontalContentAlignment="Stretch"
+          VerticalContentAlignment="Stretch" />
+    </NavigationView>
+  </Grid>
+</Window>

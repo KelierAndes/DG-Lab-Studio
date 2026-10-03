@@ -1,0 +1,41 @@
+# ===== 本地环境与中间产物 =====
+.venv/
+venv/
+__pycache__/
+*.pyc
+.vs/
+*.spec.bak
+
+# PyInstaller 中间目录与构建产物（产物经 GitHub Release 分发 zip，不入库）
+build/
+dist/
+
+# ===== 本地配置与日志（首次运行自动生成，含个人设备/端口设置）=====
+config.json
+config/
+*.log
+smoke_result.txt
+
+# ===== 开发文档（仅本地维护，不随仓库分发）=====
+DEVELOPMENT.md
+UI待办.txt
+待办事项.txt
+
+# ===== 参考资料（调查脚本与运行时备份，不随项目分发）=====
+# 注：dglab-websocket-server / dglab-websocket-simple 已改为 git submodule，不在此忽略
+_research/
+
+# ===== 联动模块的运行时附属物（依赖装到模块私有目录；下载临时区/删除残留）=====
+modules/*/_deps/
+modules/*.downloading/
+modules/*.old/
+modules/*.pending_delete/
+
+# ===== 探针工具的 .NET 构建中间产物（同规则，仅忽略产物）=====
+# 注：游戏端模组源码/编译/依赖已迁移至 dgstudio-modules-alice_cradle 仓库
+_tools/**/bin/
+_tools/**/obj/
+
+# ===== 参考资料快照中的构建中间产物（快照内容保留，仅忽略产物）=====
+_research/**/bin/
+_research/**/obj/

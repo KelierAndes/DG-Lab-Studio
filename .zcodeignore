@@ -1,0 +1,71 @@
+# ===== 本地环境与中间产物 =====
+.venv/
+venv/
+__pycache__/
+*.pyc
+.vs/
+*.spec.bak
+
+# PyInstaller 中间目录（dist/ 是构建产物，已入库用于分发，不忽略）
+build/
+
+# ===== 本地配置与日志（首次运行自动生成，含个人设备/端口设置）=====
+config.json
+config/
+*.log
+smoke_result.txt
+
+# ===== 开发文档（仅本地维护，不随仓库分发）=====
+DEVELOPMENT.md
+UI待办.txt
+待办事项.txt
+
+# ===== 参考资料（调查脚本与运行时备份，不随项目分发）=====
+# 注：dglab-websocket-server / dglab-websocket-simple 已改为 git submodule，不在此忽略
+_research/
+
+# ===== Unity 模组构建中间产物（源码 mods/ 与依赖 _vendor/ 保留）=====
+mods/**/bin/
+mods/**/obj/
+
+# ===== 探针工具的 .NET 构建中间产物（同 mods/ 规则，仅忽略产物）=====
+_tools/**/bin/
+_tools/**/obj/
+
+# ===== 参考资料快照中的构建中间产物（快照内容保留，仅忽略产物）=====
+_research/**/bin/
+_research/**/obj/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）
+# ===== Unity 模组构建中间产物（源码 mods/ 与依赖 _vendor/ 保留）=====
+mods/**/bin/
+mods/**/obj/

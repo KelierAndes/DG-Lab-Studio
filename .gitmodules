@@ -1,0 +1,6 @@
+[submodule "dglab-websocket-server"]
+	path = dglab-websocket-server
+	url = https://github.com/dungeonlab-open/dglab-websocket-server.git
+[submodule "dglab-websocket-simple"]
+	path = dglab-websocket-simple
+	url = https://github.com/dungeonlab-open/dglab-websocket-simple.git
