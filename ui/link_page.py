@@ -398,15 +398,19 @@ class LinkPage(XamlClass, Page):
         spec = self.shell.engine.modules.config_spec_for(module_id)
         cfg = self.shell.engine.modules.settings_for(module_id)
         varpool = self._var_pool(module_id)
-        blocks = [
-            self._realtime_block(module_id, cfg),
-            self._output_block(module_id, cfg, varpool),
-            self._input_block(module_id, cfg, varpool),
-            self._settings_block(module_id, spec, cfg, varpool),
-        ]
+        # 输出映射表仅对声明了 outputs 的模块渲染——纯输入模块（无回传
+        # 通道）不显示空表与添加入口，避免误导
+        has_outputs = "outputs" in spec
+        blocks = [self._realtime_block(module_id, cfg)]
+        if has_outputs:
+            blocks.append(self._output_block(module_id, cfg, varpool))
+        blocks.append(self._input_block(module_id, cfg, varpool))
+        blocks.append(self._settings_block(module_id, spec, cfg, varpool))
+        sections = [s for s in ("输出映射表" if has_outputs else None,
+                                "输入映射表", "模块设置") if s]
         return self._card_shell(
             meta["name"],
-            subtitle=f"{module_id} · 输出映射表 / 输入映射表 / 模块设置",
+            subtitle=f"{module_id} · {' / '.join(sections)}",
             symbol="Contact" if module_id == "osc_bridge" else "View",
             trailing=self._status_trailing(module_id),
             blocks=blocks)
