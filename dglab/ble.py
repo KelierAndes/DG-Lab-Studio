@@ -628,25 +628,31 @@ class BleClient:
         self._log(f"{session.slot_id} 气压读值已清零")
 
     async def fire(self, slot_id: str | None = None, duration_s: float = 1.0,
-                   value: int | None = None) -> None:
+                   value: int | dict | None = None, channels=None) -> None:
+        """临时抬升强度开火（按通道）：``channels`` 缺省双通道，``value`` 为
+        开火强度（int = 全部通道共用，dict = 按通道）；None 时用 200。"""
         session = self._session(slot_id)
         if session.kind == "bmtr":
             raise RuntimeError("灵猫是气压传感器，无输出通道")
-        cap = value if value is not None else 200
+        chans = tuple(channels) if channels else CHANNELS
+        if isinstance(value, dict):
+            caps = {ch: int(value.get(ch, 200)) for ch in chans}
+        else:
+            caps = {ch: (200 if value is None else int(value)) for ch in chans}
         if session.fire_task is not None and not session.fire_task.done():
             session.fire_task.cancel()
 
         saved = dict(self._slot(session).strength)
-        for ch in CHANNELS:
-            session._targets[ch] = cap
-            session._actual[ch] = cap
-            self._slot(session).strength[ch] = cap
+        for ch in chans:
+            session._targets[ch] = caps[ch]
+            session._actual[ch] = caps[ch]
+            self._slot(session).strength[ch] = caps[ch]
         self._publish()
 
         async def _restore() -> None:
             try:
                 await asyncio.sleep(duration_s)
-                for ch in CHANNELS:
+                for ch in chans:
                     session._targets[ch] = saved.get(ch, 0)
                     session._actual[ch] = saved.get(ch, 0)
                 self._slot(session).strength = dict(session._actual)
@@ -656,7 +662,8 @@ class BleClient:
                 pass
 
         session.fire_task = asyncio.create_task(_restore())
-        self._log(f"{session.slot_id} 一键开火 {duration_s}s 强度 {cap}")
+        self._log(f"{session.slot_id} 一键开火 {duration_s}s "
+                  f"({'/'.join(chans)}) 强度 {caps}")
 
     async def set_led(self, color: str | int, slot_id: str | None = None) -> None:
         session = self._session(slot_id)

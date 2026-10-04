@@ -46,7 +46,7 @@ class CardView:
         self.reading_tb = None
         self.edge_tb = None
         self.summary_tb = None
-        self.hold_label = None
+        self.hold_labels: dict[str, object] = {}
         self.led_combo = None
         self.chart_image = None
         self.hist_sig: tuple | None = None
@@ -187,13 +187,25 @@ class ControlPage(XamlClass, Page):
         low = 10 if ovc else 0
         settings = engine.config.setdefault("device_settings", {}).setdefault(sid, {})
         if ovc:
+            # 旧版设备级 fire_strength（双通道共用）迁移为 A/B 两键的初始值；
+            # 设备级旧值优先于全局新键，避免升级后静默改动用户已设的开火强度
+            legacy_fire = settings.get("fire_strength")
+            if legacy_fire is None:
+                legacy_fire = engine.config.get(
+                    "fire_strength_a", engine.config.get("fire_strength", 0))
+            legacy_fire_b = settings.get("fire_strength")
+            if legacy_fire_b is None:
+                legacy_fire_b = engine.config.get(
+                    "fire_strength_b", engine.config.get("fire_strength", 0))
             settings.setdefault(
                 "max_strength",
                 live.clamp_ovc_strength(engine.config.get("max_strength", 100)))
             settings.setdefault(
-                "fire_strength",
-                live.clamp_ovc_strength(engine.config.get("fire_strength", 0),
-                                        allow_zero=True))
+                "fire_strength_a",
+                live.clamp_ovc_strength(legacy_fire, allow_zero=True))
+            settings.setdefault(
+                "fire_strength_b",
+                live.clamp_ovc_strength(legacy_fire_b, allow_zero=True))
             settings.setdefault(
                 "strength_step",
                 live.round_step10(max(10, min(50, int(engine.config.get("strength_step", 1))))))
@@ -201,18 +213,21 @@ class ControlPage(XamlClass, Page):
         row.Children.Append(self._int_field(
             settings, "max_strength", "最大强度上限", low, 200, 110,
             int(engine.config.get("max_strength", 100)), round_to=step))
-        row.Children.Append(self._int_field(
-            settings, "fire_strength", "开火强度", 0, 200, 100,
-            int(engine.config.get("fire_strength", 0)), round_to=step,
-            keep_zero=ovc))
+        for ch in ("A", "B"):
+            row.Children.Append(self._int_field(
+                settings, f"fire_strength_{ch.lower()}", f"开火强度 {ch}", 0, 200, 96,
+                engine._fire_setting(sid, ch),
+                round_to=step, keep_zero=True))
         row.Children.Append(self._int_field(
             settings, "strength_step", "加减步长", low if ovc else 1, 50, 80,
             int(engine.config.get("strength_step", 1)), round_to=step))
-        row.Children.Append(W.text(
-            "仅对本设备生效 · 开火强度 0 = 跟随本卡上限"
+        inner = W.stack(spacing=4)
+        inner.Children.Append(row)
+        inner.Children.Append(W.text(
+            "仅对本设备生效 · 开火强度 A/B 分通道设置，0 = 跟随本卡上限"
             + (" · OVC 强度按 10 取整" if ovc else ""),
-            size=11, color="text3", v="center"))
-        return W.panel(row, padding=10)
+            size=11, color="text3", wrap=True))
+        return W.panel(inner, padding=10)
 
     def _output_card(self, view: CardView, sid: str, slot):
         engine = self.shell.engine
@@ -227,21 +242,27 @@ class ControlPage(XamlClass, Page):
 
         chart_panel = W.panel(self._chart_inner(view), padding=12)
 
+        # 开火按通道独立：每通道一格（开火键 + 按住键），两列自适应宽度
+        def _fire(ch: str):
+            return lambda s, e: self.shell.submit(engine.fire(slot_id=sid, channel=ch))
+
+        fire_row = W.grid(W.star(1), W.star(1))
+        fire_row.ColumnSpacing = 8
+        for idx, ch in enumerate(("A", "B")):
+            cell = W.stack(horizontal=True, spacing=8, v="center")
+            cell.Children.Append(W.text_button(f"开火 {ch}", symbol="Play",
+                                               accent=True, on_click=_fire(ch)))
+            hold_border, hold_label = W.hold_border(f"按住开火 {ch} (放开停止)")
+            hold_border.PointerPressed += self._make_hold(sid, ch, True)
+            hold_border.PointerReleased += self._make_hold(sid, ch, False)
+            hold_border.PointerCaptureLost += self._make_hold(sid, ch, False)
+            view.hold_labels[ch] = hold_label
+            cell.Children.Append(hold_border)
+            fire_row.Children.Append(W.put(cell, idx))
+
         actions = W.stack(horizontal=True, spacing=8, v="center")
-
-        def _fire(sender, args):
-            self.shell.submit(engine.fire(slot_id=sid))
-
-        actions.Children.Append(W.text_button("一键开火", symbol="Play", accent=True,
-                                              on_click=_fire))
-        hold_border, hold_label = W.hold_border("按住持续开火 (放开停止)")
-        hold_border.PointerPressed += self._make_hold(sid, True)
-        hold_border.PointerReleased += self._make_hold(sid, False)
-        hold_border.PointerCaptureLost += self._make_hold(sid, False)
-        view.hold_label = hold_label
-        actions.Children.Append(hold_border)
-
-        if self.shell.state.backend == "ble":
+        has_actions = self.shell.state.backend == "ble"
+        if has_actions:
             actions.Children.Append(self._led_combo(view, sid))
             if family == "OVC":
                 actions.Children.Append(self._profile_selector(view))
@@ -252,14 +273,17 @@ class ControlPage(XamlClass, Page):
         inner.Children.Append(self._device_params(view, sid))
         inner.Children.Append(rows)
         inner.Children.Append(chart_panel)
-        inner.Children.Append(actions)
+        inner.Children.Append(fire_row)
+        if has_actions:
+            inner.Children.Append(actions)
 
         if family == "OVC" and self.shell.state.backend == "ble":
             inner.Children.Append(self._binding_blocks(view))
 
         inner.Children.Append(W.text(
             "强度用加减键调节（步长见本卡参数）；波形可下拉跳变或 ‹ / › 逐步切换；"
-            "「归零」清强度并切回静默。开火在静默时临时切持续波形，结束后自动恢复。",
+            "「归零」清强度并切回静默。开火按通道独立（A/B 各有强度与开火键），"
+            "静默时临时切持续波形，结束后自动恢复。",
             size=11, color="text3", wrap=True))
         return W.card(inner)
 
@@ -387,19 +411,19 @@ class ControlPage(XamlClass, Page):
         self.shell.engine._selected_wave[ch] = value
         self.shell.submit(self.shell.engine.set_wave(ch, value, slot_id=view.sid))
 
-    def _make_hold(self, sid: str, active: bool):
+    def _make_hold(self, sid: str, channel: str, active: bool):
         engine = self.shell.engine
 
         def handler(sender, args):
             view = self._cards.get(sid)
             if active:
-                self.shell.submit(engine.fire_start(slot_id=sid))
-                if view is not None and view.hold_label is not None:
-                    view.hold_label.Text = "开火中… (放开停止)"
+                self.shell.submit(engine.fire_start(slot_id=sid, channel=channel))
+                if view is not None and view.hold_labels.get(channel) is not None:
+                    view.hold_labels[channel].Text = f"开火 {channel} 中… (放开停止)"
             else:
-                self.shell.submit(engine.fire_stop(slot_id=sid))
-                if view is not None and view.hold_label is not None:
-                    view.hold_label.Text = "按住持续开火 (放开停止)"
+                self.shell.submit(engine.fire_stop(slot_id=sid, channel=channel))
+                if view is not None and view.hold_labels.get(channel) is not None:
+                    view.hold_labels[channel].Text = f"按住开火 {channel} (放开停止)"
 
         return handler
 

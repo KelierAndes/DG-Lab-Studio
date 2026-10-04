@@ -70,7 +70,13 @@ def core_inputs() -> list[dict[str, Any]]:
         specs.append({"family": family, "channel": "", "group": f"{zh}通道",
                       "key": f"{prefix}fire", "label": f"{zh}开火",
                       "type": "Bool", "range": (0, 1), "action": "fire",
-                      "desc": "非零起爆 / 归零停止并恢复"})
+                      "desc": "非零起爆 / 归零停止并恢复（双通道）"})
+        for ch in ("A", "B"):
+            base_ch = {"family": family, "channel": ch, "group": f"{zh}通道"}
+            specs.append({**base_ch, "key": f"{prefix}fire_{ch.lower()}",
+                          "label": f"{zh}开火 {ch}",
+                          "type": "Bool", "range": (0, 1), "action": "fire",
+                          "desc": "仅本通道起爆 / 归零停止并恢复"})
     specs.append({"family": "", "channel": "", "group": "全局",
                   "key": "in_emergency", "label": "急停（全部设备）",
                   "type": "Bool", "range": (0, 1), "action": "emergency",
@@ -339,14 +345,17 @@ def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
         return run
 
     if action == "fire":
+        # 通道分离：带通道的 fire 参数只动本通道，家族级 fire 仍双通道
+        fire_channel = str(spec.get("channel") or "").upper() or None
+
         def run(value: int) -> None:
             if not changed(value):
                 return
             sid = slot()
             if _truthy(value):
-                api.run(api.fire_start(slot_id=sid))
+                api.run(api.fire_start(slot_id=sid, channel=fire_channel))
             else:
-                api.run(api.fire_stop(slot_id=sid))
+                api.run(api.fire_stop(slot_id=sid, channel=fire_channel))
         return run
 
     if action == "emergency":

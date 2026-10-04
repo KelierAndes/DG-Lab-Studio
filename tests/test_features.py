@@ -360,24 +360,30 @@ class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
     async def test_binding_dispatches_fire_hold(self):
         engine = self._engine()
         try:
-            started: list[str | None] = []
-            stopped: list[str | None] = []
+            started: list[tuple] = []
+            stopped: list[tuple] = []
 
-            async def fake_start(slot_id=None):
-                started.append(slot_id)
+            async def fake_start(slot_id=None, channel=None):
+                started.append((slot_id, channel))
 
-            async def fake_stop(slot_id=None):
-                stopped.append(slot_id)
+            async def fake_stop(slot_id=None, channel=None):
+                stopped.append((slot_id, channel))
 
             engine.fire_start = fake_start
             engine.fire_stop = fake_stop
-            self._set_profile(engine, {"13": "fire"})
+            self._set_profile(engine, {"13": "fire", "12": "fire_a", "11": "fire_b"})
             engine._on_ovc_button("addr-ovc", 13)
+            engine._on_ovc_button("addr-ovc", 12)
+            engine._on_ovc_button("addr-ovc", 11)
             await asyncio.sleep(0.3)
-            self.assertEqual(started, ["addr-ovc"])
+            self.assertEqual(started, [("addr-ovc", None), ("addr-ovc", "A"),
+                                       ("addr-ovc", "B")])
             engine._on_ovc_button_up("addr-ovc", 13)
+            engine._on_ovc_button_up("addr-ovc", 12)
+            engine._on_ovc_button_up("addr-ovc", 11)
             await asyncio.sleep(0.3)
-            self.assertEqual(stopped, ["addr-ovc"])
+            self.assertEqual(stopped, [("addr-ovc", None), ("addr-ovc", "A"),
+                                       ("addr-ovc", "B")])
         finally:
             engine.stop()
 
@@ -457,8 +463,9 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             calls: list[tuple] = []
 
             class FakeV4(SocketV4Client):
-                async def fire(self, slot_id=None, duration_s=1.0, value=None):
-                    calls.append((slot_id, duration_s, value))
+                async def fire(self, slot_id=None, duration_s=1.0, value=None,
+                               channels=None):
+                    calls.append((slot_id, duration_s, value, channels))
 
             backend = FakeV4(events=StateEvents())
             backend._replace_devices("app", [{"slotId": "s1", "type": "COYOTE_030",
@@ -466,7 +473,11 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
                                                             "channelB": {"intensityMax": 200}}}])
             engine._backend = backend
             await engine.fire(slot_id="s1")
-            self.assertEqual(calls, [("s1", 1.0, 100)])
+            self.assertEqual(calls, [("s1", 1.0, {"A": 100, "B": 100}, ("A", "B"))])
+
+            calls.clear()
+            await engine.fire(slot_id="s1", channel="A")
+            self.assertEqual(calls, [("s1", 1.0, {"A": 100}, ("A",))])
         finally:
             engine.stop()
 
@@ -476,7 +487,8 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             waves: list[str] = []
 
             class FakeV4(SocketV4Client):
-                async def fire(self, slot_id=None, duration_s=1.0, value=None):
+                async def fire(self, slot_id=None, duration_s=1.0, value=None,
+                               channels=None):
                     pass
 
                 async def set_wave(self, channel, waveform, duration_s=10.0, slot_id=None):
@@ -493,16 +505,25 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(waves[-1], SILENT)
             self.assertEqual(engine._selected_wave["A"], SILENT)
             self.assertNotIn(CONTINUOUS, waves[1:])
+
+            waves.clear()
+            engine._selected_wave["A"] = SILENT
+            engine._selected_wave["B"] = SILENT
+            await engine.fire(slot_id="s1", duration_s=0.05, channel="B")
+            self.assertEqual(waves, [CONTINUOUS, SILENT])
+            self.assertEqual(engine._selected_wave["A"], SILENT)
+            self.assertEqual(engine._selected_wave["B"], SILENT)
         finally:
             engine.stop()
 
     async def test_fire_uses_configured_strength(self):
         engine = self._engine()
         try:
-            seen: list[int | None] = []
+            seen: list = []
 
             class FakeV4(SocketV4Client):
-                async def fire(self, slot_id=None, duration_s=1.0, value=None):
+                async def fire(self, slot_id=None, duration_s=1.0, value=None,
+                               channels=None):
                     seen.append(value)
 
             backend = FakeV4(events=StateEvents())
@@ -513,18 +534,66 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
 
             engine.config["fire_strength"] = 0
             await engine.fire(slot_id="s1", duration_s=0.01)
-            self.assertEqual(seen[-1], 100)
+            self.assertEqual(seen[-1], {"A": 100, "B": 100})
 
             engine.config["fire_strength"] = 45
             await engine.fire(slot_id="s1", duration_s=0.01)
-            self.assertEqual(seen[-1], 45)
+            self.assertEqual(seen[-1], {"A": 45, "B": 45})
 
             backend._replace_devices("app", [{"slotId": "s1", "type": "COYOTE_030",
                                               "slotState": {"channelA": {"intensityMax": 30},
                                                             "channelB": {"intensityMax": 30}}}])
             engine.config["fire_strength"] = 150
             await engine.fire(slot_id="s1", duration_s=0.01)
-            self.assertEqual(seen[-1], 30)
+            self.assertEqual(seen[-1], {"A": 30, "B": 30})
+        finally:
+            engine.stop()
+
+    async def test_fire_channel_strengths_separate(self):
+        """通道分离：A/B 开火强度独立取值（0 = 跟随上限），互不影响。"""
+        engine = self._engine()
+        try:
+            seen: list = []
+
+            class FakeV4(SocketV4Client):
+                async def fire(self, slot_id=None, duration_s=1.0, value=None,
+                               channels=None):
+                    seen.append((value, channels))
+
+            backend = FakeV4(events=StateEvents())
+            backend._replace_devices("app", [{"slotId": "s1", "type": "COYOTE_030",
+                                              "slotState": {"channelA": {"intensityMax": 200},
+                                                            "channelB": {"intensityMax": 120}}}])
+            engine._backend = backend
+            engine.config["fire_strength_a"] = 40
+            engine.config["fire_strength_b"] = 0  # 0 = 跟随最大强度上限 (100)
+            await engine.fire(slot_id="s1", duration_s=0.01)
+            self.assertEqual(seen[-1], ({"A": 40, "B": 100}, ("A", "B")))
+
+            # 旧版双通道 fire_strength 仍作两通道的兜底
+            engine.config["fire_strength_a"] = 0
+            engine.config["fire_strength_b"] = 0
+            engine.config["fire_strength"] = 55
+            await engine.fire(slot_id="s1", duration_s=0.01)
+            self.assertEqual(seen[-1], ({"A": 55, "B": 55}, ("A", "B")))
+
+            # 设备级覆盖优先于全局
+            engine.config.setdefault("device_settings", {})["s1"] = {
+                "fire_strength_a": 66}
+            await engine.fire(slot_id="s1", duration_s=0.01)
+            self.assertEqual(seen[-1], ({"A": 66, "B": 55}, ("A", "B")))
+
+            # 每通道各自钳制到本通道上限（A 上限 200 / B 上限 120）
+            engine.config["device_settings"]["s1"] = {
+                "fire_strength_a": 0, "fire_strength_b": 150}
+            await engine.fire(slot_id="s1", duration_s=0.01)
+            self.assertEqual(seen[-1], ({"A": 100, "B": 120}, ("A", "B")))
+
+            # intensity_params 公开快照同时给出 A/B 与遗留键（0 = 跟随上限哨兵保留）
+            params = engine.intensity_params("s1")
+            self.assertEqual(params["fire_strength_a"], 0)
+            self.assertEqual(params["fire_strength_b"], 150)
+            self.assertIn("fire_strength", params)
         finally:
             engine.stop()
 
@@ -552,14 +621,16 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine._selected_wave["B"] = SILENT
 
             await engine.fire_start(slot_id="s1")
-            self.assertIn("s1", engine._fire_holds)
+            self.assertIn(("s1", "A"), engine._fire_holds)
+            self.assertIn(("s1", "B"), engine._fire_holds)
             self.assertEqual(sorted(added), [("A", 17), ("B", 20)])
             self.assertEqual(waves[0], CONTINUOUS)
 
             added.clear()
             backend.state.slots["s1"].strength = {"A": 20, "B": 20}
             await engine.fire_stop(slot_id="s1")
-            self.assertNotIn("s1", engine._fire_holds)
+            self.assertNotIn(("s1", "A"), engine._fire_holds)
+            self.assertNotIn(("s1", "B"), engine._fire_holds)
             self.assertEqual(sorted(added), [("A", -17), ("B", -20)])
             self.assertEqual(waves[-1], SILENT)
             self.assertEqual(engine._selected_wave["A"], SILENT)
@@ -567,6 +638,48 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             added.clear()
             await engine.fire_stop(slot_id="s1")
             self.assertEqual(added, [])
+        finally:
+            engine.stop()
+
+    async def test_fire_hold_per_channel(self):
+        """通道分离：只开火 A 通道时 B 通道强度与波形都不受影响。"""
+        engine = self._engine()
+        try:
+            added: list[tuple] = []
+            waves: list[str] = []
+
+            class FakeV4(SocketV4Client):
+                async def add_intensity(self, channel, value, slot_id=None):
+                    added.append((channel, value))
+
+                async def set_wave(self, channel, waveform, duration_s=10.0, slot_id=None):
+                    waves.append((channel, waveform))
+
+            backend = FakeV4(events=StateEvents())
+            backend._replace_devices("app", [{"slotId": "s1", "type": "COYOTE_030",
+                                              "props": {"intensityA": 3, "intensityB": 7},
+                                              "slotState": {"channelA": {"intensityMax": 200},
+                                                            "channelB": {"intensityMax": 200}}}])
+            engine._backend = backend
+            engine.config["fire_strength"] = 20
+            engine.config["fire_strength_a"] = 50
+            engine._selected_wave["A"] = SILENT
+            engine._selected_wave["B"] = "some_wave"
+
+            await engine.fire_start(slot_id="s1", channel="A")
+            self.assertIn(("s1", "A"), engine._fire_holds)
+            self.assertNotIn(("s1", "B"), engine._fire_holds)
+            self.assertEqual(added, [("A", 47)])
+            self.assertEqual(waves, [("A", CONTINUOUS)])
+            self.assertEqual(engine._selected_wave["B"], "some_wave")
+
+            added.clear()
+            backend.state.slots["s1"].strength = {"A": 50, "B": 7}
+            await engine.fire_stop(slot_id="s1", channel="A")
+            self.assertEqual(added, [("A", -47)])
+            self.assertEqual(waves[-1], ("A", SILENT))
+            self.assertEqual(engine._selected_wave["A"], SILENT)
+            self.assertEqual(engine._selected_wave["B"], "some_wave")
         finally:
             engine.stop()
 
@@ -972,10 +1085,11 @@ class DeviceSettingTests(unittest.IsolatedAsyncioTestCase):
     async def test_fire_uses_device_fire_strength(self):
         engine = self._engine()
         try:
-            seen: list[int | None] = []
+            seen: list = []
 
             class FakeV4(SocketV4Client):
-                async def fire(self, slot_id=None, duration_s=1.0, value=None):
+                async def fire(self, slot_id=None, duration_s=1.0, value=None,
+                               channels=None):
                     seen.append(value)
 
             backend = FakeV4(events=StateEvents())
@@ -985,7 +1099,12 @@ class DeviceSettingTests(unittest.IsolatedAsyncioTestCase):
             engine._backend = backend
             engine.config.setdefault("device_settings", {})["s1"] = {"fire_strength": 33}
             await engine.fire(slot_id="s1", duration_s=0.01)
-            self.assertEqual(seen[-1], 33)
+            self.assertEqual(seen[-1], {"A": 33, "B": 33})
+
+            engine.config["device_settings"]["s1"] = {
+                "fire_strength": 33, "fire_strength_a": 12, "fire_strength_b": 44}
+            await engine.fire(slot_id="s1", duration_s=0.01, channel="B")
+            self.assertEqual(seen[-1], {"B": 44})
         finally:
             engine.stop()
 

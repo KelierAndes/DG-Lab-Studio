@@ -29,7 +29,10 @@ BUTTON_ACTIONS = [
     ("b_strength_up", "B 通道强度 +10"), ("b_strength_down", "B 通道强度 -10"),
     ("b_strength_zero", "B 通道强度 归0"),
     ("b_wave_up", "B 切换上一个波形"), ("b_wave_down", "B 切换下一个波形"),
-    ("fire", "持续开火 (按住开火)"), ("estop", "急停"),
+    ("fire", "持续开火 (按住，双通道)"),
+    ("fire_a", "持续开火 A (按住，仅 A 通道)"),
+    ("fire_b", "持续开火 B (按住，仅 B 通道)"),
+    ("estop", "急停"),
 ]
 KEY_BINDING_ACTION = ("key", "模拟键盘按键…")
 BUTTON_ACTION_LABELS = dict(BUTTON_ACTIONS)

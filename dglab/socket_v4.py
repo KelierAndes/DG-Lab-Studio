@@ -650,18 +650,27 @@ class SocketV4Client:
             await self._rpc_or_clear(cid, None)
 
     async def fire(self, slot_id: str | None = None, duration_s: float = 1.0,
-                   value: float | None = None) -> None:
+                   value=None, channels=None) -> None:
+        """临时抬升强度开火（按通道）：``channels`` 缺省双通道，``value`` 为
+        开火强度（int = 全部通道共用，dict = 按通道）；None 时用通道上限。"""
         cid, sid = self._require_peer(slot_id)
         self._check_output_slot(sid)
         duration_ms = max(1, round(duration_s * 1000))
         slot = self.state.slots.get(sid)
-        for ch in CHANNELS:
+        chans = tuple(channels) if channels else CHANNELS
+        for ch in chans:
             cap = 200
             if slot is not None:
                 cap = slot.strength_limit.get(ch, 200)
-            v = min(value, cap) if value is not None else cap
+            if isinstance(value, dict):
+                v = min(int(value.get(ch, cap)), cap)
+            elif value is not None:
+                v = min(value, cap)
+            else:
+                v = cap
             await self.set_temp_intensity(ch, v, duration_ms, slot_id=sid)
-        self._log(f"{sid} 一键开火 {duration_ms}ms (强度 {value or '通道上限'})")
+        self._log(f"{sid} 一键开火 {duration_ms}ms ({'/'.join(chans)} "
+                  f"强度 {value or '通道上限'})")
 
     async def emergency_stop(self) -> None:
         await self.stop_wave_loop()

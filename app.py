@@ -41,6 +41,8 @@ class Config(dict):
         "strength_step": 1,
         "fire_duration_s": 1.0,
         "fire_strength": 0,
+        "fire_strength_a": 0,
+        "fire_strength_b": 0,
         "ble": {
             "soft_limit_a": 200,
             "soft_limit_b": 200,
@@ -139,7 +141,7 @@ class Engine:
         self.events.on("modules_changed", self._on_module_change)
         self.events.on("ovc_button", self._on_ovc_button)
         self.events.on("ovc_button_up", self._on_ovc_button_up)
-        self._fire_holds: dict[str, dict] = {}
+        self._fire_holds: dict[tuple[str, str], dict] = {}
         self._migrate_ovc_profiles()
 
     def start(self) -> None:
@@ -444,6 +446,8 @@ class Engine:
         "max_strength": (0, 200, int),
         "strength_step": (1, 50, int),
         "fire_strength": (0, 200, int),
+        "fire_strength_a": (0, 200, int),
+        "fire_strength_b": (0, 200, int),
         "fire_duration_s": (0.1, 60.0, float),
     }
 
@@ -452,10 +456,17 @@ class Engine:
 
         返回 slot_id 对应设备（缺省解析为默认输出设备）的当前强度、上限、
         探活状态、最大强度/步长/开火强度等全部强度相关参数。
+        开火强度按通道拆分：``fire_strength_a`` / ``fire_strength_b``（0 =
+        跟随本设备上限），``fire_strength`` 为旧版双通道共用的遗留键（兼容保留）。
         """
         state = self.get_state()
         sid = self.resolve_slot(slot_id)
         slot = state.slots.get(sid) if sid else None
+
+        def _fire_raw(channel: str) -> int:
+            """通道开火强度原始设定（0 = 跟随上限；取值链见 _fire_setting）。"""
+            return self._fire_setting(sid, channel)
+
         return {
             "slot_id": sid,
             "connected": bool(slot is not None),
@@ -467,13 +478,62 @@ class Engine:
             "max_strength": int(self.device_setting(sid, "max_strength") or 100),
             "strength_step": self.device_step(sid),
             "fire_strength": int(self.device_setting(sid, "fire_strength") or 0),
+            "fire_strength_a": _fire_raw("A"),
+            "fire_strength_b": _fire_raw("B"),
             "fire_duration_s": float(self.device_setting(sid, "fire_duration_s") or 1.0),
             "wave_duration_s": float(self.config.get("wave_duration_s", 10.0)),
             "wave": self.wave_selection(),
         }
 
+    def _fire_setting(self, slot_id: str | None, channel: str) -> int:
+        """通道开火强度的「最具体非零」设定；全链无设定返回 0（跟随上限）。
+
+        取值链：设备级 ``fire_strength_<通道>`` → 全局 ``fire_strength_<通道>``
+        → 设备级 ``fire_strength``（旧版双通道键）→ 全局 ``fire_strength``。
+        设备级键**存在即为用户意图**（显式 0 = 跟随上限，该层终结）；
+        全局 0 视为未设定，继续向旧键回退（升级兼容）。
+        """
+        low = str(channel or "A").lower()
+        per_dev = self.config.get("device_settings", {}).get(slot_id or "") or {}
+        for key in (f"fire_strength_{low}", "fire_strength"):
+            if key in per_dev:
+                try:
+                    return max(0, min(200, int(per_dev[key] or 0)))
+                except (TypeError, ValueError):
+                    continue
+            value = self.config.get(key)
+            try:
+                value = int(value) if value is not None else 0
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                return max(0, min(200, value))
+        return 0
+
+    def fire_strength(self, slot_id: str | None, channel: str) -> int:
+        """某通道开火强度的实际生效值（显式 0 / 全链未设定 = 跟随最大强度上限）。
+
+        在 ``_fire_setting`` 结果上做跟随上限替换，再按该通道实际上报
+        上限与设备量程取整钳制。"""
+        cap = self._fire_setting(slot_id, channel)
+        if cap <= 0:
+            cap = int(self.device_setting(slot_id, "max_strength") or 100)
+        cap = max(1, min(200, cap))
+        slot = self.get_state().slots.get(slot_id) if slot_id else None
+        if slot is not None:
+            limit = int(slot.strength_limit.get(str(channel).upper(), 200))
+            if limit > 0:
+                cap = min(cap, limit)
+            cap = self._quantize_for_device(slot, cap)
+        return max(1, cap)
+
+    def _fire_value(self, slot, sid: str | None = None, channel: str = "A") -> int:
+        """开火强度取值（``fire_strength`` 的内部入口，slot 已由调用方解析）。"""
+        return self.fire_strength(sid, channel)
+
     def set_intensity_param(self, key: str, value, slot_id: str | None = None) -> None:
-        """强度参数公开写入口（max_strength/strength_step/fire_strength/fire_duration_s/wave_duration_s）。
+        """强度参数公开写入口（max_strength/strength_step/fire_strength/
+        fire_strength_a/fire_strength_b/fire_duration_s/wave_duration_s）。
 
         slot_id 给出时写入该设备的独立覆盖（device_settings），否则写全局配置。
         """
@@ -590,7 +650,8 @@ class Engine:
                 await self.set_wave(ch, SILENT, slot_id=sid)
 
     async def zap(self, channel: str, seconds: float = 1.0, slot_id: str | None = None) -> None:
-        await self.fire(slot_id=slot_id, duration_s=seconds)
+        """瞬时脉冲：仅对指定通道开火（通道分离后 zap 不再波及另一通道）。"""
+        await self.fire(slot_id=slot_id, duration_s=seconds, channel=channel)
 
     async def emergency_stop(self) -> None:
         backend = self._require_backend()
@@ -618,38 +679,37 @@ class Engine:
                 task.cancel()
         self._fire_holds.clear()
 
-    def _fire_value(self, slot, sid: str | None = None) -> int:
-        cap = int(self.device_setting(sid, "fire_strength") or 0)
-        if cap <= 0:
-            cap = int(self.device_setting(sid, "max_strength") or 100)
-        cap = max(1, min(200, cap))
-        if slot is not None:
-            limit = min(slot.strength_limit.get("A", 200),
-                        slot.strength_limit.get("B", 200))
-            if limit > 0:
-                cap = min(cap, limit)
-            cap = self._quantize_for_device(slot, cap)
-        return max(1, cap)
-
     def _fire_waves(self, sid: str) -> dict[str, str]:
         return {ch: str(self._selected_wave.get(ch) or SILENT) for ch in ("A", "B")}
 
-    async def fire(self, slot_id: str | None = None, duration_s: float | None = None) -> None:
+    @staticmethod
+    def _fire_channels(channel: str | None) -> tuple[str, ...]:
+        """开火通道集合：显式 A/B 只动该通道，其余（None/旧调用）双通道。"""
+        return (channel,) if channel in ("A", "B") else ("A", "B")
+
+    async def fire(self, slot_id: str | None = None, duration_s: float | None = None,
+                   channel: str | None = None) -> None:
+        """一键开火：指定通道（``channel``="A"/"B"）或全部通道（缺省）。
+
+        通道处于静默时临时切持续波形，结束后切回原本选定的波形。
+        """
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
         if sid is None:
             raise RuntimeError("没有可用设备")
         duration = float(duration_s or self.config["fire_duration_s"])
+        channels = self._fire_channels(channel)
         state = self.get_state()
         slot = state.slots.get(sid)
-        cap = self._fire_value(slot, sid)
+        caps = {ch: self._fire_value(slot, sid, ch) for ch in channels}
         original = self._fire_waves(sid)
-        switched = [ch for ch in ("A", "B") if original[ch] in ("", SILENT)]
+        switched = [ch for ch in channels if original[ch] in ("", SILENT)]
         try:
             for ch in switched:
                 await self.set_wave(ch, CONTINUOUS, slot_id=sid)
             if isinstance(backend, (SocketV4Client, BleClient)):
-                await backend.fire(slot_id=sid, duration_s=duration, value=cap)
+                await backend.fire(slot_id=sid, duration_s=duration,
+                                   channels=channels, value=caps)
             else:
                 self._log("当前连接模式不支持一键开火")
                 return
@@ -662,70 +722,95 @@ class Engine:
                 except Exception:
                     pass
 
-    async def fire_start(self, slot_id: str | None = None) -> None:
+    async def fire_start(self, slot_id: str | None = None,
+                         channel: str | None = None) -> None:
+        """按住持续开火：按通道独立保持（``channel`` 缺省 = 双通道）。
+
+        保持记录以 (设备, 通道) 为键；已处于开火保持的通道不会重复触发。
+        V4 以增量抬升强度，结束（或超时）时按设备回报恢复；其余后端直接
+        设为开火强度，结束时恢复原强度。
+        """
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
         if sid is None:
             raise RuntimeError("没有可用设备")
-        if sid in self._fire_holds:
-            return
+        channels = self._fire_channels(channel)
         state = self.get_state()
         slot = state.slots.get(sid)
-        value = self._fire_value(slot, sid)
-        hold = {
-            "waves": self._fire_waves(sid),
-            "strength": dict(slot.strength) if slot is not None else {"A": 0, "B": 0},
-            "value": value,
-            "applied": {"A": 0, "B": 0},
-            "task": None,
-        }
-        self._fire_holds[sid] = hold
+        started: list[tuple[str, dict]] = []
+        for ch in channels:
+            if (sid, ch) in self._fire_holds:
+                continue
+            value = self._fire_value(slot, sid, ch)
+            hold = {
+                "waves": {ch: str(self._selected_wave.get(ch) or SILENT)},
+                "strength": {ch: slot.strength.get(ch, 0) if slot is not None else 0},
+                "value": value,
+                "applied": {ch: 0},
+                "task": None,
+            }
+            self._fire_holds[(sid, ch)] = hold
+            started.append((ch, hold))
+        if not started:
+            return
         try:
-            for ch in ("A", "B"):
+            for ch, hold in started:
                 if hold["waves"][ch] in ("", SILENT):
                     await self.set_wave(ch, CONTINUOUS, slot_id=sid)
             if isinstance(backend, SocketV4Client):
-                for ch in ("A", "B"):
+                for ch, hold in started:
                     cur = slot.strength.get(ch, 0) if slot is not None else 0
-                    if value > cur:
-                        delta = value - cur
+                    if hold["value"] > cur:
+                        delta = hold["value"] - cur
                         await backend.add_intensity(ch, delta, slot_id=sid)
                         hold["applied"][ch] = delta
             elif isinstance(backend, SocketV3Client):
-                for ch in ("A", "B"):
-                    await backend.set_strength(ch, value)
+                for ch, hold in started:
+                    await backend.set_strength(ch, hold["value"])
             else:
-                for ch in ("A", "B"):
-                    await backend.set_strength(ch, value, slot_id=sid)
+                for ch, hold in started:
+                    await backend.set_strength(ch, hold["value"], slot_id=sid)
         except Exception:
-            self._fire_holds.pop(sid, None)
+            for ch, hold in started:
+                self._fire_holds.pop((sid, ch), None)
             raise
-        hold["task"] = asyncio.create_task(self._fire_hold_timeout(sid))
-        self._log(f"{sid} 触发开火开始 (强度 {value})")
+        for ch, hold in started:
+            hold["task"] = asyncio.create_task(self._fire_hold_timeout(sid, ch))
+            self._log(f"{sid} 通道 {ch} 触发开火开始 (强度 {hold['value']})")
 
-    async def _fire_hold_timeout(self, sid: str) -> None:
+    async def _fire_hold_timeout(self, sid: str, channel: str) -> None:
         try:
             await asyncio.sleep(FIRE_HOLD_MAX_S)
         except asyncio.CancelledError:
             return
-        self._log(f"{sid} 触发开火超时自动停止 (安全上限 {FIRE_HOLD_MAX_S:.0f}s)")
+        self._log(f"{sid} 通道 {channel} 触发开火超时自动停止 "
+                  f"(安全上限 {FIRE_HOLD_MAX_S:.0f}s)")
         try:
-            await self.fire_stop(slot_id=sid)
+            await self.fire_stop(slot_id=sid, channel=channel)
         except Exception:
             pass
 
-    async def fire_stop(self, slot_id: str | None = None) -> None:
+    async def fire_stop(self, slot_id: str | None = None,
+                        channel: str | None = None) -> None:
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
-        hold = self._fire_holds.pop(sid, None)
-        if hold is None:
+        if sid is None:
             return
-        task = hold.get("task")
-        if task is not None:
-            task.cancel()
+        channels = self._fire_channels(channel)
+        holds: list[tuple[str, dict]] = []
+        for ch in channels:
+            hold = self._fire_holds.pop((sid, ch), None)
+            if hold is not None:
+                holds.append((ch, hold))
+        if not holds:
+            return
+        for _ch, hold in holds:
+            task = hold.get("task")
+            if task is not None:
+                task.cancel()
         if isinstance(backend, SocketV4Client):
             raised = [
-                ch for ch in ("A", "B")
+                ch for ch, hold in holds
                 if hold["applied"].get(ch)
                 and self.get_state().slots.get(sid) is not None
                 and self.get_state().slots[sid].strength.get(ch, 0)
@@ -741,12 +826,12 @@ class Engine:
                     or cur.strength.get(ch, 0)
                     >= min(int(hold["value"]), int(hold["strength"].get(ch, 0))
                            + int(hold["applied"].get(ch, 0)))
-                    for ch in ("A", "B")
+                    for ch, hold in holds
                 ):
                     break
         state = self.get_state()
         slot = state.slots.get(sid)
-        for ch in ("A", "B"):
+        for ch, hold in holds:
             wave = hold["waves"].get(ch, SILENT)
             self._selected_wave[ch] = wave
             try:
@@ -754,7 +839,7 @@ class Engine:
             except Exception:
                 pass
         if isinstance(backend, SocketV4Client):
-            for ch in ("A", "B"):
+            for ch, hold in holds:
                 cur = slot.strength.get(ch, 0) if slot is not None else 0
                 delta = int(hold["strength"].get(ch, 0)) - cur
                 if delta == 0:
@@ -768,13 +853,14 @@ class Engine:
                     except Exception as exc:
                         self._log(f"{sid} 开火恢复强度失败: {exc!r}")
         elif isinstance(backend, SocketV3Client):
-            for ch in ("A", "B"):
+            for ch, hold in holds:
                 await backend.set_strength(ch, int(hold["strength"].get(ch, 0)))
         else:
-            for ch in ("A", "B"):
+            for ch, hold in holds:
                 await backend.set_strength(ch, int(hold["strength"].get(ch, 0)),
                                            slot_id=sid)
-        self._log(f"{sid} 触发开火结束 (强度与波形已恢复)")
+        self._log(f"{sid} 通道 {'/'.join(ch for ch, _ in holds)} "
+                  f"触发开火结束 (强度与波形已恢复)")
 
     async def set_led_color(self, color: str, slot_id: str | None = None) -> None:
         backend = self._require_backend()
@@ -944,6 +1030,10 @@ class Engine:
         async def _run() -> None:
             if binding == "fire":
                 await self.fire_start(slot_id=slot_id)
+            elif binding == "fire_a":
+                await self.fire_start(slot_id=slot_id, channel="A")
+            elif binding == "fire_b":
+                await self.fire_start(slot_id=slot_id, channel="B")
             elif binding == "estop":
                 await self.emergency_stop()
             elif binding.endswith("_zero"):
@@ -965,7 +1055,7 @@ class Engine:
                            "b_strength_up", "b_strength_down",
                            "b_strength_zero",
                            "b_wave_up", "b_wave_down",
-                           "fire", "estop")
+                           "fire", "fire_a", "fire_b", "estop")
 
     def _on_ovc_button_up(self, slot_id: str, bit: int) -> None:
         binding = self.ovc_bindings().get(str(bit), "none")
@@ -987,9 +1077,11 @@ class Engine:
                 self._log(f"按键动作 {action.key} 松开处理失败:\n"
                           f"{traceback.format_exc()}")
             return
-        if binding == "fire":
+        if binding in ("fire", "fire_a", "fire_b"):
+            stop_ch = ({"fire_a": "A", "fire_b": "B"}.get(binding))
+
             async def _stop() -> None:
-                await self.fire_stop(slot_id=slot_id)
+                await self.fire_stop(slot_id=slot_id, channel=stop_ch)
 
             if self.loop is not None and self.loop.is_running():
                 asyncio.run_coroutine_threadsafe(_stop(), self.loop)

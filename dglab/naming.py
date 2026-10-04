@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from dglab.params import core_inputs, output_spec
 
-# 输入参数的默认头像参数名模板：家族 → (参数后缀模板, 全局前缀名)
+# 输入参数的默认头像参数名模板：家族 → (参数后缀模板, 全局前缀名)。
+# fire 模板带 {ch}：家族级开火通道为空串（原名不变），通道开火得到
+# FireA/FireB 后缀，避免与双通道 fire 的默认参数名冲突。
 INPUT_NAME_TEMPLATES = {
     "COYOTE": ("{prefix}Strength{ch}", "{prefix}Wave{ch}",
-               "{prefix}WaveStep{ch}", "{prefix}Zap{ch}", "{prefix}Fire"),
+               "{prefix}WaveStep{ch}", "{prefix}Zap{ch}", "{prefix}Fire{ch}"),
     "OVC": ("{prefix}InStrength{ch}", "{prefix}InWave{ch}",
-            "{prefix}InWaveStep{ch}", "{prefix}InZap{ch}", "{prefix}InFire"),
+            "{prefix}InWaveStep{ch}", "{prefix}InZap{ch}", "{prefix}InFire{ch}"),
 }
 
 

@@ -276,13 +276,25 @@ class ModuleContext:
     def device_step(self, slot_id: str | None = None) -> int:
         return self.engine.device_step(slot_id)
 
-    def fire_start(self, slot_id: str | None = None):
-        return self.engine.fire_start(slot_id=slot_id)
+    def fire(self, slot_id: str | None = None, duration_s: float | None = None,
+             channel: str | None = None):
+        """一键开火（定时，到时自动恢复强度/波形）。
 
-    def fire_stop(self, slot_id: str | None = None):
-        return self.engine.fire_stop(slot_id=slot_id)
+        ``channel``="A"/"B" 只开火该通道，缺省双通道；需当前连接方式
+        支持（Socket V4 / 蓝牙）。"""
+        return self.engine.fire(slot_id=slot_id, duration_s=duration_s,
+                                channel=channel)
+
+    def fire_start(self, slot_id: str | None = None, channel: str | None = None):
+        """按住持续开火（``channel``="A"/"B" 只动该通道，缺省双通道）。"""
+        return self.engine.fire_start(slot_id=slot_id, channel=channel)
+
+    def fire_stop(self, slot_id: str | None = None, channel: str | None = None):
+        """停止开火并恢复强度/波形（``channel`` 缺省 = 全部通道）。"""
+        return self.engine.fire_stop(slot_id=slot_id, channel=channel)
 
     def zap(self, channel: str, seconds: float = 1.0, slot_id: str | None = None):
+        """瞬时脉冲：仅对指定通道开火 ``seconds`` 秒（通道分离语义）。"""
         return self.engine.zap(channel, seconds, slot_id=slot_id)
 
     def emergency_stop(self):

@@ -229,6 +229,40 @@ class ChannelLimitClampTests(unittest.TestCase):
         self.assertEqual(sent, [("in_fire", 1)])
 
 
+class FireNamingTests(unittest.TestCase):
+    """通道开火的默认参数名：通道后缀区分 fire_a/b，家族级 fire 名称不变。"""
+
+    CONFIG = {"prefix": "DGLab",
+              "device_prefixes": {"COYOTE": "DGLab", "OVC": "DGLabOvc"}}
+
+    def test_fire_names_have_channel_suffix(self):
+        from dglab.naming import default_input_name
+
+        self.assertEqual(default_input_name(self.CONFIG, "in_fire"),
+                         "DGLabFire")
+        self.assertEqual(default_input_name(self.CONFIG, "in_fire_a"),
+                         "DGLabFireA")
+        self.assertEqual(default_input_name(self.CONFIG, "in_fire_b"),
+                         "DGLabFireB")
+        self.assertEqual(default_input_name(self.CONFIG, "in_ovc_fire"),
+                         "DGLabOvcInFire")
+        self.assertEqual(default_input_name(self.CONFIG, "in_ovc_fire_a"),
+                         "DGLabOvcInFireA")
+
+    def test_fire_params_are_per_channel(self):
+        from dglab.params import input_spec, input_specs
+
+        specs = input_specs()
+        for prefix in ("in_", "in_ovc_"):
+            for ch in ("a", "b"):
+                spec = input_spec(f"{prefix}fire_{ch}")
+                self.assertIsNotNone(spec)
+                self.assertEqual(spec["channel"], ch.upper())
+                self.assertEqual(spec["action"], "fire")
+        self.assertEqual(input_spec("in_fire_a")["channel"], "A")
+        self.assertEqual(input_spec("in_fire")["channel"], "")
+
+
 class DispatcherEdgeTests(unittest.TestCase):
     """fire / zap / 急停派发器的 0↔非零边沿记忆：重复派发不再重复动作。"""
 
@@ -242,12 +276,12 @@ class DispatcherEdgeTests(unittest.TestCase):
         def resolve_slot(self, family=""):
             return "s1"
 
-        def fire_start(self, slot_id=None):
-            self.calls.append(("fire", "start"))
+        def fire_start(self, slot_id=None, channel=None):
+            self.calls.append(("fire", "start", channel))
             return _noop_coro()
 
-        def fire_stop(self, slot_id=None):
-            self.calls.append(("fire", "stop"))
+        def fire_stop(self, slot_id=None, channel=None):
+            self.calls.append(("fire", "stop", channel))
             return _noop_coro()
 
         def zap(self, channel, seconds=1.0, slot_id=None):
@@ -270,7 +304,23 @@ class DispatcherEdgeTests(unittest.TestCase):
         actions["in_fire"](1)
         actions["in_fire"](0)
         actions["in_fire"](0)
-        self.assertEqual(api.calls, [("fire", "start"), ("fire", "stop")])
+        self.assertEqual(api.calls,
+                         [("fire", "start", None), ("fire", "stop", None)])
+
+    def test_fire_channel_dispatch(self):
+        """通道分离：fire_a / fire_b 只派发对应通道，与双通道 fire 互不混淆。"""
+        api, actions = self._actions()
+        actions["in_fire_a"](1)
+        actions["in_fire_a"](1)
+        actions["in_fire_a"](0)
+        actions["in_fire_b"](1)
+        actions["in_fire_b"](0)
+        actions["in_ovc_fire_a"](1)
+        self.assertEqual(api.calls, [
+            ("fire", "start", "A"), ("fire", "stop", "A"),
+            ("fire", "start", "B"), ("fire", "stop", "B"),
+            ("fire", "start", "A"),
+        ])
 
     def test_zap_and_emergency_dedupe(self):
         api, actions = self._actions()
