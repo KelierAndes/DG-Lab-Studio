@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
+from collections import deque
 from typing import Any
 
 import websockets
 
 from .state import EngineState, Slot, StateEvents
-from .waves import CoyoteWaveform, OvcWaveform, resolve_wave_frames
+from .waves import PULSE_STREAM, CoyoteWaveform, resolve_wave_frames
 
 DEFAULT_V3_RELAY = "wss://ws.dungeon-lab.cn/"
 QR_TEMPLATE = "https://www.dungeon-lab.com/app-download.php#DGLAB-SOCKET#{url}"
@@ -18,6 +20,11 @@ _STRENGTH_RE = re.compile(r"^strength-(\d+)[-+](\d+)[-+](\d+)[-+](\d+)$")
 _FEEDBACK_RE = re.compile(r"^feedback-(\d+)$")
 
 CHANNEL_NUM = {"A": 1, "B": 2}
+
+# 外部脉冲流（V3 为尽力而为）：协议只能整段替换波形，故缓存推入的帧并按
+# 节流周期把最近窗口整段下发（App 以该时长播放，窗口衔接近似实时）。
+PULSE_WINDOW_FRAMES = 20
+PULSE_SEND_S = 1.0
 
 
 def build_v3_qr(relay_url: str, target_id: str) -> str:
@@ -36,6 +43,8 @@ class SocketV3Client:
         self._ws: Any = None
         self._reader_task: asyncio.Task | None = None
         self._closing = False
+        self._pulse_buf: dict[str, deque] = {}
+        self._pulse_last: dict[str, float] = {}
 
     def _log(self, msg: str) -> None:
         self.events.emit("log", f"[V3] {msg}")
@@ -215,6 +224,13 @@ class SocketV3Client:
     ) -> None:
         if not self.state.paired:
             raise RuntimeError("V3 尚未与 App 完成配对")
+        if waveform == PULSE_STREAM:
+            # 选中外部脉冲流：清空该通道脉冲缓存与 App 队列，等待模块推流
+            self._pulse_buf.pop(channel, None)
+            self._pulse_last.pop(channel, None)
+            await self._send({"type": 4, "channel": CHANNEL_NUM[channel],
+                              "message": "clear"})
+            return
         frames = resolve_wave_frames(waveform, "COYOTE_030")
         frames = frames[:100]
         payload = json.dumps(frames, ensure_ascii=False, separators=(",", ":"))
@@ -226,6 +242,26 @@ class SocketV3Client:
                 "message": f"{channel}:{payload}",
             }
         )
+
+    async def push_pulse_frame(self, slot_id: str, channel: str, frame: str) -> None:
+        """外部脉冲流（V3 尽力而为）：缓存推入帧并按节流周期整段重发最近窗口。
+
+        V3 协议只能整段替换波形、无法逐帧追加，故每秒把最近
+        ``PULSE_WINDOW_FRAMES`` 帧以两倍窗口时长下发（App 内循环衔接），
+        实时性弱于蓝牙 / V4 直连。未配对时静默丢弃。"""
+        if not self.state.paired:
+            return
+        buf = self._pulse_buf.setdefault(channel, deque(maxlen=100))
+        buf.append(frame)
+        now = time.monotonic()
+        if now - self._pulse_last.get(channel, 0.0) < PULSE_SEND_S:
+            return
+        self._pulse_last[channel] = now
+        window = list(buf)[-PULSE_WINDOW_FRAMES:]
+        try:
+            await self.send_wave(channel, window, len(window) * 0.1 * 2)
+        except Exception as exc:
+            self._log(f"{channel} 脉冲流窗口下发失败: {exc!r}")
 
     async def clear_pulse(self, channel: str | None = None) -> None:
         if not self.state.paired:

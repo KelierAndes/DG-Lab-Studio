@@ -247,6 +247,16 @@ class ModuleContext:
     def set_wave(self, channel: str, name: str, slot_id: str | None = None):
         return self.engine.set_wave(channel, name, slot_id=slot_id)
 
+    def push_pulse_stream(self, frequency: int, channel: str = "A", level: int = 100,
+                          slot_id: str | None = None):
+        """外部脉冲流：模块每 0.1s 推入一次频率数据（核心生成波形用）。
+
+        返回协程——引擎循环上下文直接 ``await``，否则 ``ctx.submit``。
+        仅当该通道波形选中「外部脉冲流」时落地；逻辑频率 10-1000，
+        电平 0-100（0 即该帧静音）。"""
+        return self.engine.push_pulse_stream(frequency, channel, level=level,
+                                             slot_id=slot_id)
+
     def wave_order(self, family: str = "COYOTE") -> list[str]:
         from dglab.waves import wave_order
         return wave_order(family)

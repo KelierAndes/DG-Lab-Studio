@@ -11,10 +11,12 @@ from .waves import (
     CONTINUOUS,
     CoyoteWaveform,
     FrameCycle,
+    PULSE_STREAM,
     SILENT,
     frequency_to_xy,
     ovc_channel_pattern,
     resolve_wave_frames,
+    trim_pulse_stream,
     wire_to_logical_freq,
 )
 
@@ -589,7 +591,24 @@ class BleClient:
             raise RuntimeError("灵猫是气压传感器，无波形输出")
         frames = resolve_wave_frames(waveform, session.device_type)
         session._cycles[channel].reset(frames)
-        self._log(f"{session.slot_id} 通道 {channel} 波形已更新 ({len(frames)} 帧)")
+        self._log(f"{session.slot_id} 通道 {channel} 波形已更新 ({len(frames)} 帧)"
+                  + ("（外部脉冲流：帧随模块推送追加）"
+                     if waveform == PULSE_STREAM else ""))
+
+    async def push_pulse_frame(self, slot_id: str, channel: str, frame: str) -> None:
+        """外部脉冲流：模块推入的一帧 (100ms) 追加到该通道播放队列尾部。
+
+        仅在引擎选中脉冲流波形时被调用；设备按 100ms/帧消费，模块按
+        0.1s 节奏推送即实时成流。超长从头裁剪，未知设备 / 灵猫静默忽略。
+        """
+        session = self.sessions.get(slot_id)
+        if session is None or session.kind == "bmtr":
+            return
+        if channel not in session._cycles:
+            return
+        frames = session._cycles[channel].frames
+        frames.append(frame)
+        trim_pulse_stream(frames)
 
     async def clear_wave(self, channel: str | None = None, slot_id: str | None = None) -> None:
         sessions = [self.sessions[slot_id]] if slot_id and slot_id in self.sessions \

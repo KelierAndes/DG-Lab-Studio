@@ -8,7 +8,7 @@ import unittest.mock
 
 from dglab.ble import BleClient, V3_NOTIFY
 from dglab.state import EngineState, Slot, StateEvents, family_of
-from dglab.waves import CONTINUOUS, SILENT
+from dglab.waves import CONTINUOUS, PULSE_STREAM, SILENT
 
 
 class FakeBleakClient:
@@ -299,7 +299,8 @@ class LiveDataTests(unittest.TestCase):
         ovc = live.wave_items("OVC")
         self.assertEqual(coyote[0][1], SILENT)
         self.assertEqual(ovc[0][1], SILENT)
-        self.assertEqual(coyote[-1][1], CONTINUOUS)
+        self.assertEqual(coyote[-1][1], PULSE_STREAM)
+        self.assertEqual(coyote[-2][1], CONTINUOUS)
         self.assertGreater(len(coyote), len(ovc))
 
     def test_family_of_helpers(self):

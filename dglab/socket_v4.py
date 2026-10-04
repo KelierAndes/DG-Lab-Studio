@@ -13,7 +13,8 @@ import websockets
 
 from .monitor import WaveMonitor
 from .state import EngineState, Slot, StateEvents
-from .waves import FrameCycle, resolve_wave_frames
+from .waves import (PULSE_STREAM, FrameCycle, resolve_wave_frames,
+                    trim_pulse_stream)
 
 DEFAULT_V4_RELAY = "wss://trex.dungeon-lab.cn/v4"
 PING_INTERVAL = 2.0
@@ -80,6 +81,7 @@ class SocketV4Client:
         self.monitors: dict[str, WaveMonitor] = {}
         self._wave_task: asyncio.Task | None = None
         self._play_deadline: dict[tuple[str, str], float] = {}
+        self._pulse_keys: set[tuple[str, str]] = set()
         self._props_logged: set[str] = set()
 
     def _log(self, msg: str) -> None:
@@ -201,6 +203,9 @@ class SocketV4Client:
                     continue
                 cycle = self._cycles.get(key)
                 if cycle is None or not cycle.frames:
+                    if key in self._pulse_keys:
+                        # 外部脉冲流：帧未到前不下发静默帧，保持队列为空等待推流
+                        continue
                     self.set_wave_frames(sid, ch,
                                          getattr(self, "_silent_frames", None))
                     cycle = self._cycle(sid, ch)
@@ -588,7 +593,17 @@ class SocketV4Client:
         slot = self.state.slots.get(sid)
         if slot is not None and slot.type:
             device_type = slot.type
+        key = (sid, channel)
         frames = resolve_wave_frames(waveform, device_type)
+        if waveform == PULSE_STREAM:
+            # 外部脉冲流：空表起步并标记脉冲通道（帧由模块推送追加，
+            # 未推送前波形循环不下发静默帧）
+            self._pulse_keys.add(key)
+            self._cycle(sid, channel).reset([])
+            self._play_deadline.pop(key, None)
+            self._log(f"{sid} 通道 {channel} 波形切换: 外部脉冲流 (等待模块推流)")
+            return
+        self._pulse_keys.discard(key)
         self.set_wave_frames(sid, channel, frames)
         frames = self._slot_wave_frames(sid, device_type, channel) or frames
         try:
@@ -596,6 +611,25 @@ class SocketV4Client:
         except Exception as exc:
             self._log(f"{sid} 波形切换失败: {exc!r}")
         self._log(f"{sid} 通道 {channel} 波形切换: {len(frames)} 帧 (持续循环)")
+
+    async def push_pulse_frame(self, slot_id: str, channel: str, frame: str) -> None:
+        """外部脉冲流：模块推入的一帧 (100ms) 追加到该通道播放队列尾部。
+
+        波形循环按 0.6s 提前量从队列取帧下发，模块按 0.1s 节奏推送即
+        实时成流；超长从头裁剪。首帧即时下发（immediate 冲掉切换前
+        残留的旧波形队列）。"""
+        key = (slot_id, channel)
+        cycle = self._cycle(slot_id, channel)
+        first = not cycle.frames
+        cycle.frames.append(frame)
+        trim_pulse_stream(cycle.frames)
+        if first and self._active_client_id() is not None:
+            try:
+                batch = [cycle.next_frame()
+                         for _ in range(min(WAVE_BATCH_FRAMES, len(cycle.frames)))]
+                await self._send_batch(slot_id, channel, batch, immediate=True)
+            except Exception as exc:
+                self._log(f"{slot_id}/{channel} 脉冲流首帧发送失败: {exc!r}")
 
     async def clear_wave(self, channel: str | None = None, slot_id: str | None = None) -> None:
         cid, sid = self._require_peer(slot_id)

@@ -20,7 +20,8 @@ from dglab.relay_v4 import RelayV4Server
 from dglab.socket_v3 import DEFAULT_V3_RELAY, SocketV3Client
 from dglab.socket_v4 import DEFAULT_V4_RELAY, SocketV4Client
 from dglab.state import EngineState, StateEvents, family_of
-from dglab.waves import (CONTINUOUS, COYOTE_WAVEFORMS, CoyoteWaveform, SILENT,
+from dglab.waves import (CONTINUOUS, COYOTE_WAVEFORMS, CoyoteWaveform,
+                         PULSE_STREAM, SILENT, pulse_frame,
                          resolve_wave_frames, wave_order)
 from plugins import PluginManager
 
@@ -547,6 +548,28 @@ class Engine:
             )
         else:
             await backend.set_wave(channel, name, slot_id=self.resolve_slot(slot_id, output_only=True))
+
+    async def push_pulse_stream(self, frequency: int, channel: str = "A",
+                                level: int = 100, slot_id: str | None = None) -> None:
+        """外部脉冲流：接收联动模块推入的频率数据（每 0.1s 一次）生成波形。
+
+        模块以 0.1s 节奏调用（每帧 100ms），核心把「逻辑频率 (10-1000) +
+        电平 (0-100)」转成一帧脉冲追加到设备播放队列——替代内置波形发生器。
+        仅当该通道波形选中「外部脉冲流」时落地，其余情况静默丢弃（模块可
+        常推不息）；未连接设备同样忽略。V3 连接为尽力而为（整段窗口重发）。
+        """
+        backend = self._backend
+        if backend is None:
+            return
+        if self._selected_wave.get(channel) != PULSE_STREAM:
+            return
+        push = getattr(backend, "push_pulse_frame", None)
+        if push is None:
+            raise RuntimeError("当前连接方式不支持外部脉冲流")
+        sid = self.resolve_slot(slot_id, output_only=True)
+        if sid is None:
+            return
+        await push(sid, channel, pulse_frame(frequency, level))
 
     async def reset_strength(self, channel: str, slot_id: str | None = None) -> None:
         backend = self._require_backend()

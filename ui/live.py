@@ -8,7 +8,7 @@ from collections import deque
 from dglab.official_waveforms import COYOTE_WAVEFORMS, CoyoteWaveform
 from dglab.official_waveforms_ovc import OVC_WAVEFORMS, OvcWaveform
 from dglab.state import EngineState, family_of
-from dglab.waves import CONTINUOUS, SILENT
+from dglab.waves import CONTINUOUS, PULSE_STREAM, SILENT
 
 FAMILIES = ("COYOTE", "OVC", "BMTR")
 FAMILY_LABELS = {"COYOTE": "郊狼 (电刺激)", "OVC": "负鼠 (振动)", "BMTR": "灵猫 (气压)"}
@@ -78,6 +78,7 @@ def wave_items(family: str = "COYOTE") -> list[tuple[str, str]]:
         cn = label.get("cn") or wave.value
         items.append((f"{cn} ({wave.value})", wave.value))
     items.append(("持续 (Continuous)", CONTINUOUS))
+    items.append(("外部脉冲流 (PULSE_STREAM)", PULSE_STREAM))
     return items
 
 def wave_label(value: str, family: str = "COYOTE") -> str:

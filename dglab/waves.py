@@ -9,6 +9,10 @@ from .official_waveforms_ovc import OVC_WAVEFORMS, OvcWaveform
 __all__ = [
     "SILENT",
     "SILENT_FRAMES",
+    "PULSE_STREAM",
+    "PULSE_STREAM_MAX_FRAMES",
+    "pulse_frame",
+    "trim_pulse_stream",
     "COYOTE_WAVEFORMS",
     "CoyoteWaveform",
     "OVC_WAVEFORMS",
@@ -121,6 +125,9 @@ def resolve_wave_frames(waveform: "CoyoteWaveform | OvcWaveform | str | list[str
         return list(waveform)
     if waveform == SILENT:
         return list(SILENT_FRAMES)
+    if waveform == PULSE_STREAM:
+        # 脉冲流无静态帧表：循环从空起步，帧由模块推送时逐帧追加
+        return []
     if waveform == CONTINUOUS:
         if device_type.upper().startswith("OVC"):
             return [build_frame([0x0A] * 4, [100] * 4)]
@@ -131,12 +138,40 @@ def resolve_wave_frames(waveform: "CoyoteWaveform | OvcWaveform | str | list[str
 
 CONTINUOUS = "__CONTINUOUS__"
 SILENT = "__SILENT__"
+# 外部脉冲流：波形不由内置发生器产生，而由联动模块按 0.1s 节奏推送频率数据
+# （每帧 100ms），核心只负责把推入的帧按序播放。选中时后端循环从空表起步，
+# 随推送逐帧追加（超长从头裁剪），模块停推即以最后一段循环。
+PULSE_STREAM = "__PULSE_STREAM__"
+PULSE_STREAM_MAX_FRAMES = 200
 CONTINUOUS_FRAMES = [build_frame([40, 40, 40, 40], [100, 100, 100, 100])]
 SILENT_FRAMES = [build_frame([10, 10, 10, 10], [0, 0, 0, 0])]
 
 
+def pulse_frame(frequency: int, level: int = 100) -> str:
+    """逻辑频率 (10-1000) + 电平 (0-100) → 一帧 100ms 脉冲（四段同值）。
+
+    联动模块经 ``ctx.push_pulse_stream`` 推流时由引擎逐次构建；
+    电平 0 即该帧静音（波形成形仍保留频率）。
+    """
+    wire = logical_to_wire_freq(frequency)
+    amp = max(0, min(100, int(level)))
+    return build_frame([wire] * 4, [amp] * 4)
+
+
+def trim_pulse_stream(frames: list[str]) -> None:
+    """把脉冲流播放队列裁剪到上限内（从头丢弃最旧帧，原地修改）。"""
+    while len(frames) > PULSE_STREAM_MAX_FRAMES:
+        frames.pop(0)
+
+
 def wave_order(family: str = "COYOTE") -> list[str]:
-    """设备家族可用的波形枚举序列（静默/持续在前，供步进与直接跳变使用）。"""
+    """设备家族可用的波形枚举序列（静默/持续在前，供步进与直接跳变使用）。
+
+    外部脉冲流追加在末尾（内置波形序号保持稳定，追加不改变既有配置的
+    波形下标语义）。
+    """
     if family == "OVC":
-        return [SILENT, CONTINUOUS] + [w.value for w in OvcWaveform]
-    return [SILENT, CONTINUOUS] + [w.value for w in CoyoteWaveform]
+        return ([SILENT, CONTINUOUS] + [w.value for w in OvcWaveform]
+                + [PULSE_STREAM])
+    return ([SILENT, CONTINUOUS] + [w.value for w in CoyoteWaveform]
+            + [PULSE_STREAM])
