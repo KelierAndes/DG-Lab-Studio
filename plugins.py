@@ -1,14 +1,3 @@
-"""联动模块（插件）宿主：发现、加载、启停与卸载。
-
-模块放置于应用目录 modules/<module_id>/ 下，至少包含一个 plugin.py：
-声明模块级 META 字典并定义 ModuleBase 的子类。宿主负责把引擎的公开
-命令层（强度参数、波形、开火、急停等）通过 ModuleContext 提供给模块。
-
-模块设置独立于主 config.json，存放于 config/<模块>.json（与主配置同目录），
-由宿主读写并自动落盘；启用/自启动状态存于 config/modules.json。
-旧版主配置中的模块段会在首次运行时自动迁移。联动模块已外置到
-dgstudio-modules-market 仓库（模块页按需下载），模块开发文档见该仓库 EXTENSIONS.md。
-"""
 from __future__ import annotations
 
 import ast
@@ -41,7 +30,6 @@ def _base_dir() -> str:
 if getattr(sys, "frozen", False):
     _exe_dir = _base_dir()
     if _exe_dir not in sys.path:
-        # modules/ 提升到 exe 同级后，模块的包导入（modules.<id>.server）从 exe 旁解析
         sys.path.insert(0, _exe_dir)
 
 
@@ -55,7 +43,6 @@ def _load_json_file(path: str) -> dict:
 
 
 def spec_defaults(spec: dict | None) -> dict:
-    """从配置项声明（键 → {default: ...}）提取扁平缺省值表。"""
     out: dict[str, Any] = {}
     for key, item in (spec or {}).items():
         if isinstance(item, dict) and "default" in item:
@@ -64,10 +51,6 @@ def spec_defaults(spec: dict | None) -> dict:
 
 
 class JsonDict(dict):
-    """写穿式字典：任何顶层变更立即保存到对应 JSON 文件。
-
-    嵌套字典的就地修改不会触发保存（模块可显式调用 save()）。
-    """
 
     def __init__(self, path: str, data: dict | None = None):
         super().__init__(data or {})
@@ -108,12 +91,10 @@ class JsonDict(dict):
         self.save()
 
 
-# 残留目录自动清理标记：delete_module 删不净时写入，下次启动整目录清扫
 _CLEANUP_MARKER = ".dgstudio_pending_cleanup"
 
 
 def module_roots() -> list[str]:
-    """模块扫描根列表：modules/ 与 exe 同级（打包后由 build_exe.py 复制到产物根）。"""
     roots: list[str] = [os.path.join(_base_dir(), "modules")]
     out: list[str] = []
     seen: set[str] = set()
@@ -126,11 +107,6 @@ def module_roots() -> list[str]:
 
 
 class ButtonAction:
-    """模块提供的负鼠按键绑定动作。
-
-    绑定值格式为 "<key>" 或带参数的 "<key>:<参数>"（如 osc:/avatar/…）。
-    模块加载时动作进入注册表（绑定选择框出现该项），卸载时撤下。
-    """
 
     def __init__(self, key: str, label: str, *, argument_placeholder: str = "",
                  on_press=None, on_release=None, owner: str = ""):
@@ -143,7 +119,6 @@ class ButtonAction:
 
 
 class ModuleBase:
-    """联动模块基类：子类放在 modules/<id>/plugin.py 中并由宿主实例化。"""
 
     id: str = ""
     name: str = ""
@@ -152,67 +127,37 @@ class ModuleBase:
     settings_key: str = ""
 
     def config_spec(self) -> dict:
-        """声明本模块配置项：键 → {label, type, default, group, ...}。
-
-        宿主在装载 config/<模块>.json 时按声明自动补齐缺失项并落盘，
-        联动/设置等页面据此自动生成编辑控件。缺省实现返回空字典，
-        此时宿主改用 plugin.py 中模块级 META["config"] 静态声明。
-        """
         return {}
 
     def link_params(self) -> list[tuple[str, str]]:
-        """模块侧可写参数表 ``(变量名, 说明)``，供联动页表达式变量池使用。
-
-        可写参数是模块喂进核心信号空间的命名数值（MOD 上报、OSC 收包），
-        可在输入映射表表达式中以 ``{名称}`` 引用。常规模块返回
-        META["params"] 声明的固定参数集；OSC 之类动态建表的模块返回
-        运行期实际收到的参数名。
-        """
         return []
 
     def read_params(self) -> list[tuple[str, str]]:
-        """模块侧可读参数表 ``(信号名, 说明)``（输出映射默认字段建议）。
-
-        可读参数是模块从核心读走并回传给对端的字段：META["reads"] 按
-        「核心输出信号名 → {label, name, type}」声明，模块装载时据此为
-        空输出表落地默认行，联动页输出表也以它们作字段名联想。
-        """
         return []
 
     def temp_specs(self) -> list[dict]:
-        """模块读写的临时变量声明 ``[{key, label, desc}]``（可选实现）。
-
-        联动页「临时变量」面板将其展示为模块维护行（实时值可引用）；
-        缺省实现取 META["temps"]。模块代码经 ``ctx.set_temp/get_temp``
-        读写，值空间与临时变量表表达式共享。
-        """
         return []
 
     def on_load(self, ctx: "ModuleContext") -> None:
-        """模块被加载时调用一次（注册事件、读取配置）。"""
+        pass
 
     def on_unload(self) -> None:
-        """模块被卸载时调用（必须释放已注册的事件与资源）。"""
+        pass
 
     async def start(self) -> None:
-        """启动模块运行（异步，运行在引擎事件循环上）。"""
+        pass
 
     async def stop(self) -> None:
-        """停止模块运行（异步，运行在引擎事件循环上）。"""
+        pass
 
     def is_running(self) -> bool:
         return False
 
     def button_actions(self) -> list:
-        """模块注册的负鼠按键绑定动作（ButtonAction 列表，可选实现）。"""
         return []
 
 
 class ModuleContext:
-    """交给模块的公开 API：设备状态、强度参数、命令与事件总线。
-
-    模块只应通过本对象访问引擎；除这里列出的方法外都视为内部实现。
-    """
 
     def __init__(self, engine, module: ModuleBase):
         self.engine = engine
@@ -237,7 +182,6 @@ class ModuleContext:
 
     @property
     def settings(self) -> dict:
-        """模块私有设置（JsonDict，写操作自动保存到 config/<模块>.json）。"""
         return self.engine.modules.settings_for(self.module_id)
 
     def strength(self, slot_id: str | None = None, channel: str = "A") -> int:
@@ -266,11 +210,6 @@ class ModuleContext:
 
     def push_pulse_stream(self, frequency: int, channel: str = "A", level: int = 100,
                           slot_id: str | None = None):
-        """外部脉冲流：模块每 0.1s 推入一次频率数据（核心生成波形用）。
-
-        返回协程——引擎循环上下文直接 ``await``，否则 ``ctx.submit``。
-        仅当该通道波形选中「外部脉冲流」时落地；逻辑频率 10-1000，
-        电平 0-100（0 即该帧静音）。"""
         return self.engine.push_pulse_stream(frequency, channel, level=level,
                                              slot_id=slot_id)
 
@@ -295,48 +234,34 @@ class ModuleContext:
 
     def fire(self, slot_id: str | None = None, duration_s: float | None = None,
              channel: str | None = None):
-        """一键开火（定时，到时自动恢复强度/波形）。
-
-        ``channel``="A"/"B" 只开火该通道，缺省双通道；需当前连接方式
-        支持（Socket V4 / 蓝牙）。"""
         return self.engine.fire(slot_id=slot_id, duration_s=duration_s,
                                 channel=channel)
 
     def fire_start(self, slot_id: str | None = None, channel: str | None = None):
-        """按住持续开火（``channel``="A"/"B" 只动该通道，缺省双通道）。"""
         return self.engine.fire_start(slot_id=slot_id, channel=channel)
 
     def fire_stop(self, slot_id: str | None = None, channel: str | None = None):
-        """停止开火并恢复强度/波形（``channel`` 缺省 = 全部通道）。"""
         return self.engine.fire_stop(slot_id=slot_id, channel=channel)
 
     def zap(self, channel: str, seconds: float = 1.0, slot_id: str | None = None):
-        """瞬时脉冲：仅对指定通道开火 ``seconds`` 秒（通道分离语义）。"""
         return self.engine.zap(channel, seconds, slot_id=slot_id)
 
     def emergency_stop(self):
         return self.engine.emergency_stop()
 
-    # ---- 临时变量（声明见 META["temps"]；事件流在联动页配置，运算只在临时变量表） ----
 
     def set_temp(self, key: str, value) -> None:
-        """写临时变量（数值化；与联动页临时变量表、事件流动作共享值空间，
-        写入即触发映射重算）。"""
         self.engine.modules.set_temp(self.module_id, key, value)
 
     def get_temp(self, key: str, default: float = 0.0) -> float:
-        """读临时变量（未写过返回 ``default``）。"""
         return self.engine.modules.get_temp(self.module_id, key, default)
 
-    # ---- 游戏模组（META["mods"] + mods/ 载荷；通用接口，携带模组的模块可用） ----
 
     def game_mods_dir(self) -> str | None:
-        """模块携带的游戏模组目录（mods/，无载荷返回 None）。"""
         return self.engine.modules.module_mods_dir(self.module_id)
 
     def scan_game_roots(self, *, roots: list[str] | None = None,
                         max_depth: int = 3) -> list[str]:
-        """按 META["mods"]["marker"] 浅层扫描游戏根目录（默认各盘符根）。"""
         mods = ((self.engine.modules.meta(self.module_id) or {})
                 .get("mods") or {})
         marker = str(mods.get("marker") or "")
@@ -346,16 +271,10 @@ class ModuleContext:
             marker, roots=roots, max_depth=max_depth)
 
     def install_game_mod(self, game_root: str) -> int:
-        """把携带的游戏模组释放到游戏根目录，返回写入的文件数。
-
-        目标缺 BepInEx 时用模块携带的 ``vendor/BepInEx_win_*.zip`` 自动
-        安装（mods/ 内置 BepInEx/ 目录优先）；目标不含主程序时抛
-        ValueError。"""
         return self.engine.modules.install_game_mod(self.module_id, game_root)
 
 
 class PluginManager:
-    """扫描 modules/ 目录，负责模块的加载、启停、卸载与启用状态持久化。"""
 
     def __init__(self, engine):
         self.engine = engine
@@ -365,11 +284,8 @@ class PluginManager:
         self._ctxs: dict[str, ModuleContext] = {}
         self._button_actions: dict[str, ButtonAction] = {}
         self._settings_cache: dict[str, JsonDict] = {}
-        # 每模块临时变量共享空间（模块 ctx 读写、映射引擎求值同源）
         self._temps: dict[str, dict[str, float]] = {}
-        # 每模块事件流节拍任务（asyncio Future，卸载/停用时取消）
         self._event_tasks: dict[str, Future] = {}
-        # 模块配置目录：与主 config.json 同目录的 config/ 子目录
         main_dir = os.path.dirname(os.path.abspath(getattr(engine.config, "path",
                                                            _base_dir())))
         self.config_dir = os.path.join(main_dir, "config")
@@ -385,16 +301,13 @@ class PluginManager:
 
     @property
     def base_dir(self) -> str:
-        """用户模块目录（放这里的新模块可被「扫描模块目录」发现）。"""
         return module_roots()[-1]
 
     def module_dir(self, module_id: str) -> str | None:
-        """模块文件夹（plugin.py 所在目录）。"""
         path = self._paths.get(module_id)
         return os.path.dirname(path) if path else None
 
     def module_mods_dir(self, module_id: str) -> str | None:
-        """模块携带的游戏模组目录（modules/<id>/mods/，存在且非空才返回）。"""
         module_dir = self.module_dir(module_id)
         if not module_dir:
             return None
@@ -409,18 +322,15 @@ class PluginManager:
         return None
 
     def module_deps_dir(self, module_id: str) -> str:
-        """模块私有依赖目录（modules/<id>/_deps/，打包运行时装依赖用）。"""
         module_dir = self.module_dir(module_id)
         return os.path.join(module_dir, "_deps") if module_dir else ""
 
     def _attach_deps_path(self, module_id: str) -> None:
-        """把模块私有依赖目录加入 sys.path（存在才加，置于最前）。"""
         deps = self.module_deps_dir(module_id)
         if deps and os.path.isdir(deps) and deps not in sys.path:
             sys.path.insert(0, deps)
 
     def _detach_deps_path(self, module_id: str) -> None:
-        """卸载时移除模块私有依赖目录的 sys.path 项（与 _attach 对称）。"""
         deps = self.module_deps_dir(module_id)
         if not deps:
             return
@@ -428,11 +338,6 @@ class PluginManager:
         sys.path[:] = [p for p in sys.path if os.path.normcase(p) != key]
 
     def _purge_module_cache(self, module_id: str) -> None:
-        """热重载支持：清掉该模块的全部导入缓存与 pyc，再装时按盘上代码重新导入。
-
-        覆盖包形式（modules.<id>.plugin 及其全部子模块）与散文件形式
-        （dgstudio_module_<id>_plugin），并清掉父包上的子模块属性引用。
-        """
         package = f"modules.{module_id}"
         stale = [name for name in list(sys.modules)
                  if name == package or name.startswith(package + ".")
@@ -454,12 +359,6 @@ class PluginManager:
                     dirs.remove("__pycache__")
 
     def install_game_mod(self, module_id: str, game_root: str) -> int:
-        """把模块携带的游戏模组释放到游戏目录（BepInEx），返回模组文件数。
-
-        目标缺 BepInEx 时自动安装：优先合并 mods/ 自带的 ``BepInEx/`` 子目录，
-        否则解压模块携带的 ``vendor/BepInEx_win_*.zip``——仅当目标目录
-        看起来是游戏根目录（含 marker 主程序或任意 exe）才执行，避免污染
-        随手选中的文件夹。"""
         mods_cfg = dict((self.meta(module_id) or {}).get("mods") or {})
         dest_rel = str(mods_cfg.get("dest") or "").strip("/\\")
         marker = str(mods_cfg.get("marker") or "").strip()
@@ -496,8 +395,6 @@ class PluginManager:
 
     def _install_bepinex(self, game_root: str, mods_dir: str,
                          vendor_dir: str) -> int:
-        """安装 BepInEx 运行时：mods/ 自带 ``BepInEx/``（非空）优先合并，
-        否则解压模块携带的 ``vendor/BepInEx_win_*.zip``；两者皆无返回 0。"""
         bundled = os.path.join(mods_dir, "BepInEx")
         if os.path.isdir(bundled):
             files = sum(len(names) for _root, _dirs, names in
@@ -529,7 +426,6 @@ class PluginManager:
     def scan_game_roots(self, marker: str, *,
                         roots: list[str] | None = None,
                         max_depth: int = 3) -> list[str]:
-        """在盘符根（或指定根列表）浅层扫描包含 marker 可执行文件的游戏目录。"""
         marker = str(marker or "").strip().lower()
         if not marker:
             return []
@@ -562,7 +458,6 @@ class PluginManager:
         return found
 
     def _settings_stem(self, module_id: str) -> str:
-        """模块设置文件名（不含扩展名）：实例/META 的 settings_key 优先，缺省用 id。"""
         inst = self._instances.get(module_id)
         if inst is not None and getattr(inst, "settings_key", ""):
             return str(inst.settings_key)
@@ -570,11 +465,6 @@ class PluginManager:
         return str(meta.get("settings_key") or module_id)
 
     def settings_for(self, module_id: str) -> JsonDict:
-        """模块私有设置（加载后缓存，写操作自动落盘 config/<stem>.json）。
-
-        装载时按模块声明（config_spec / META["config"]）自动补齐缺失项，
-        并清除映射表时代的 mappings/outputs 遗留设置项（事件流是唯一数据面，不迁移）。
-        """
         cached = self._settings_cache.get(module_id)
         if cached is not None:
             return cached
@@ -587,11 +477,6 @@ class PluginManager:
         return settings
 
     def _purge_stale_event_actions(self, module_id: str, settings: JsonDict) -> None:
-        """清除事件动作里引用已下线核心参数的僵尸行（如已移除的瞬时脉冲）。
-
-        参数目录之外的输入动作在派发时只会报「派发失败」，留在配置里即是
-        死行：直接删除并记日志。输出动作的目标是输出信号，不在清洗范围。
-        """
         events = [e for e in (settings.get("events") or [])
                   if isinstance(e, dict)]
         if not events:
@@ -614,14 +499,6 @@ class PluginManager:
                 f"模块 {module_id} 事件流中引用已下线核心参数的动作已清除")
 
     def _purge_legacy_tables(self, module_id: str, settings: JsonDict) -> None:
-        """清除映射表时代的 mappings/outputs 设置项（用户指示：不迁移）。
-
-        事件流是唯一数据面：遗留映射/输出设置**直接删除键**（不转换、
-        不保留空项；模块代码对缺失键按空表处理，兼容无忧），配置里确保
-        无此项。同时清掉早期自动迁移的产物（「输入映射（迁移）」卡片与
-        仅被其引用的 map_* 临时行——用户已在事件流重建行为，保留即重复
-        驱动的幽灵流）。非空内容被清除时记日志，空键静默删除。
-        """
         mappings = [r for r in (settings.get("mappings") or [])
                     if isinstance(r, dict)]
         outputs = [r for r in (settings.get("outputs") or [])
@@ -651,7 +528,7 @@ class PluginManager:
             for t in temps:
                 name = str(t.get("name") or "")
                 if name in candidates:
-                    continue          # 候选行本身不算引用(避免自保活)
+                    continue
                 if name:
                     referenced.add(name)
                 referenced |= set(expr_variables(str(t.get("expr") or "")))
@@ -681,7 +558,6 @@ class PluginManager:
                              + "；".join(parts))
 
     def config_spec_for(self, module_id: str) -> dict:
-        """模块配置项声明：实例 config_spec() 优先，其次 META["config"] 静态声明。"""
         inst = self._instances.get(module_id)
         if inst is not None:
             try:
@@ -695,7 +571,6 @@ class PluginManager:
         return spec if isinstance(spec, dict) else {}
 
     def _apply_spec_defaults(self, module_id: str, settings: JsonDict) -> bool:
-        """把声明中缺失的缺省值写入模块配置并落盘，返回是否发生变更。"""
         spec = self.config_spec_for(module_id)
         missing: dict[str, Any] = {}
         nested_changed = False
@@ -718,7 +593,6 @@ class PluginManager:
         return bool(missing) or nested_changed
 
     def ensure_all_configs(self) -> list[str]:
-        """为全部已发现模块按声明补齐配置文件，返回发生补齐的模块 id。"""
         touched: list[str] = []
         for module_id in sorted(self._paths):
             cached = self._settings_cache.get(module_id)
@@ -734,7 +608,6 @@ class PluginManager:
         return touched
 
     def _migrate_from_main_config(self) -> None:
-        """旧版把模块设置存在主 config.json（顶层键 + modules 段）——一次性拆出。"""
         cfg = self.engine.config
         changed = False
 
@@ -762,7 +635,6 @@ class PluginManager:
             if not isinstance(old, dict) or not old:
                 continue
             if "enabled" in old:
-                # 旧语义：模块启用状态混在设置里（如 osc.enabled），移入 modules.json
                 self._enabled_map().setdefault(module_id, bool(old["enabled"]))
                 old = {k: v for k, v in old.items() if k != "enabled"}
             write_settings(stem, old)
@@ -770,17 +642,12 @@ class PluginManager:
             changed = True
 
         if changed:
-            self._modules_state.save()  # enabled 走嵌套变更，显式落盘
+            self._modules_state.save()
             self.engine.config.save()
-            # 迁移直接改写了磁盘文件，丢弃 discover 期间预载的缓存再按盘重取
             self._settings_cache.clear()
             self.engine._log("已将模块配置从 config.json 拆分到 config/ 目录")
 
     def discover(self) -> list[dict]:
-        """扫描各模块根目录，返回全部模块元数据（不执行模块代码）。
-
-        同一模块 id 在多个根下出现时，靠后的根（用户目录）覆盖靠前的（内置）。
-        """
         self._sweep_pending_deletes()
         self._paths.clear()
         self._meta.clear()
@@ -825,7 +692,6 @@ class PluginManager:
             if module_id in self._meta:
                 self._meta[module_id]["loaded"] = True
                 self._meta[module_id]["running"] = inst.is_running()
-        # is_enabled 依赖 self._meta 中的 default_enabled，须在整表构建完成后回填
         self._refresh_enabled_flags()
         self.ensure_all_configs()
         return self.list_modules()
@@ -844,7 +710,6 @@ class PluginManager:
         return self._instances.get(module_id)
 
     def register_instance(self, module_id: str, instance: ModuleBase | None) -> None:
-        """直接注入/移除模块实例（测试与程序化替换用，正常装卸请用 install/uninstall）。"""
         if instance is None:
             self._instances.pop(module_id, None)
             self._button_actions = {key: action for key, action
@@ -866,7 +731,6 @@ class PluginManager:
         return self._modules_state.setdefault("enabled", {})
 
     def is_enabled(self, module_id: str) -> bool:
-        """模块是否启用（安装自启动）。显式记录优先，否则取 META default_enabled。"""
         enabled = self._enabled_map()
         if module_id in enabled:
             return bool(enabled[module_id])
@@ -875,19 +739,17 @@ class PluginManager:
 
     def set_enabled(self, module_id: str, value: bool) -> None:
         self._enabled_map()[module_id] = bool(value)
-        self._modules_state.save()  # 嵌套字典变更不触发写穿，显式落盘
+        self._modules_state.save()
         if module_id in self._meta:
             self._meta[module_id]["enabled"] = bool(value)
 
     def button_actions(self) -> list[ButtonAction]:
-        """已加载模块注册的全部按键绑定动作。"""
         return list(self._button_actions.values())
 
     def action(self, key: str) -> ButtonAction | None:
         return self._button_actions.get(key)
 
     def module_for_action(self, key: str) -> str | None:
-        """提供该按键动作的模块 id：优先查已加载注册表，其次各模块 META 声明。"""
         action = self._button_actions.get(key)
         if action is not None:
             return action.owner
@@ -918,7 +780,7 @@ class PluginManager:
         self._ctxs[module_id] = ctx
         inst.on_load(ctx)
         self._instances[module_id] = inst
-        self._temps.pop(module_id, None)   # 全新装载 = 临时变量空间清零
+        self._temps.pop(module_id, None)
         if module_id in self._meta:
             self._meta[module_id]["loaded"] = True
         self._register_actions(module_id, inst)
@@ -927,7 +789,6 @@ class PluginManager:
         return inst
 
     def _unregister_actions(self, module_id: str) -> None:
-        """注销该模块注册的全部按键动作（卸载与停用时调用）。"""
         self._button_actions = {key: action for key, action
                                 in self._button_actions.items()
                                 if action.owner != module_id}
@@ -946,7 +807,6 @@ class PluginManager:
                 self.engine._log(f"模块 {module_id} 的按键动作 {action.key} "
                                  f"已被模块 {existing.owner} 注册，忽略重复项")
                 continue
-            # 同模块重注册（停用→重启）静默覆盖，幂等
             self._button_actions[action.key] = action
 
     async def unload(self, module_id: str) -> None:
@@ -966,7 +826,6 @@ class PluginManager:
         if module_id in self._meta:
             self._meta[module_id]["loaded"] = False
             self._meta[module_id]["running"] = False
-        # 热重载：卸载即清导入缓存与依赖路径，再安装/更新无需重启
         self._purge_module_cache(module_id)
         self._detach_deps_path(module_id)
         self.engine._log(f"模块已卸载: {inst.name or module_id}")
@@ -974,7 +833,7 @@ class PluginManager:
 
     async def start(self, module_id: str) -> None:
         inst = self.load(module_id)
-        self._register_actions(module_id, inst)  # 停用期间注销过，幂等重注册
+        self._register_actions(module_id, inst)
         await inst.start()
         self.apply_logic_tables(module_id)
         if module_id in self._meta:
@@ -990,28 +849,19 @@ class PluginManager:
             self._meta[module_id]["running"] = False
 
     async def deactivate(self, module_id: str) -> None:
-        """停用（联动页开关关）：停止运行并记为关闭，不卸载实例。
-
-        与 uninstall（模块页显式卸载）的区别：实例与导入缓存保留，联动页
-        卡片仅折叠不移除，重开开关复用已加载实例秒启。按键动作随停止注销
-        （停止中的模块不再响应绑定），重新启动时在 start 里幂等重注册。
-        """
         self._unregister_actions(module_id)
         self.set_enabled(module_id, False)
         self._cancel_event_stream(module_id)
         await self.stop(module_id)
         self.engine.events.emit("modules_changed", module_id)
 
-    # --------------------------------------------- 事件流与临时变量（宿主侧）
 
     def _mapping_engine(self, module_id: str):
-        """模块的映射引擎（bridge.engine / server.engine），无则 None。"""
         inst = self._instances.get(module_id)
         runtime = getattr(inst, "bridge", None) or getattr(inst, "server", None)
         return getattr(runtime, "engine", None) if runtime is not None else None
 
     def temp_specs_for(self, module_id: str) -> list[dict]:
-        """临时变量声明：实例 temp_specs() 优先，其次 META["temps"]。"""
         inst = self._instances.get(module_id)
         if inst is not None:
             try:
@@ -1025,7 +875,6 @@ class PluginManager:
                                   .get("temps") or [])]
 
     def temps_space(self, module_id: str) -> dict[str, float]:
-        """模块临时变量共享空间（引擎求值与模块 ctx 读写同源）。"""
         return self._temps.setdefault(module_id, {})
 
     def set_temp(self, module_id: str, key: str, value) -> None:
@@ -1035,19 +884,12 @@ class PluginManager:
         self.temps_space(module_id)[str(key)] = num
         eng = self._mapping_engine(module_id)
         if eng is not None and getattr(eng, "temps", None) is not None:
-            eng.pump()          # 新数据 → 重算映射表（与 signal 同语义）
+            eng.pump()
 
     def get_temp(self, module_id: str, key: str, default: float = 0.0) -> float:
         return float(self.temps_space(module_id).get(str(key), default))
 
     def apply_logic_tables(self, module_id: str) -> None:
-        """把联动页配置的临时变量表/事件流卡片装载进模块映射引擎。
-
-        临时变量空间由宿主持有并注入引擎（attach_temps），模块 ctx 与
-        配置表达式读写同一份；事件流由宿主节拍循环驱动（每 50ms 一拍，
-        周期更新/变量变更/if 判断三种驱动事件）。模块 reload_config 后
-        需再次调用（reload）。
-        """
         eng = self._mapping_engine(module_id)
         if eng is None or not hasattr(eng, "attach_temps"):
             return
@@ -1058,7 +900,6 @@ class PluginManager:
         self._ensure_event_stream(module_id)
 
     def _ensure_event_stream(self, module_id: str) -> None:
-        """启动模块的事件流节拍循环（已运行则跳过）。"""
         if self._event_tasks.get(module_id) is not None:
             return
         eng = self._mapping_engine(module_id)
@@ -1074,7 +915,6 @@ class PluginManager:
             task.cancel()
 
     async def _event_stream_loop(self, module_id: str) -> None:
-        """事件流节拍：每 50ms 驱动一次该模块的事件卡片（触发判定+动作）。"""
         import time as _time
         try:
             while True:
@@ -1087,7 +927,6 @@ class PluginManager:
             pass
 
     async def reload(self, module_id: str) -> None:
-        """重载运行中模块：原生 reload_config + 宿主逻辑表（temps/事件流）。"""
         inst = self._instances.get(module_id)
         if inst is None:
             return
@@ -1103,7 +942,6 @@ class PluginManager:
             self.engine._log(f"模块 {inst.id} 停止失败:\n{traceback.format_exc()}")
 
     async def _ensure_dependencies(self, module_id: str) -> None:
-        """安装时按模块 requirements.txt（回退 META 声明）补装缺失依赖。"""
         requirements, source = self.store.requirements_of(module_id)
         if not requirements:
             return
@@ -1120,26 +958,15 @@ class PluginManager:
         self.engine._log(f"模块 {module_id} 依赖就绪")
 
     async def install(self, module_id: str) -> None:
-        """安装 = 按声明补装依赖 + 记住启用状态并立即加载启动。"""
         await self._ensure_dependencies(module_id)
         self.set_enabled(module_id, True)
         await self.start(module_id)
 
     async def uninstall(self, module_id: str) -> None:
-        """卸载 = 停止并移除实例，启用状态记为关闭（文件保留在模块目录）。"""
         self.set_enabled(module_id, False)
         await self.unload(module_id)
 
     def delete_module(self, module_id: str) -> None:
-        """删除模块文件夹（含私有 _deps）。已加载的模块须先卸载。
-
-        Windows 句柄实验结论（_tools/probe_file_lock*.py）：已载入扩展
-        （.pyd/.dll 映像锁）删不掉但**可改名**；普通打开句柄/数据内存映射
-        （杀软实时扫描等，瞬时为主）删不掉且**不可改名**，连整目录改名都
-        会被阻止。策略：短重试等瞬时占用释放 → 整目录改名摘出命名空间
-        （纯映像锁场景）→ 逐文件挽救可改名文件。残余文件打标记，下次
-        启动 _sweep_pending_deletes 清扫（锁已释放）。
-        """
         if module_id in self._instances:
             raise RuntimeError(f"模块 {module_id} 正在运行，请先卸载")
         module_dir = self.module_dir(module_id)
@@ -1158,7 +985,7 @@ class PluginManager:
             except OSError as exc:
                 last_exc = exc
                 if attempt < 2:
-                    time.sleep(0.8)  # 杀软等瞬时占用：稍候重试
+                    time.sleep(0.8)
         if last_exc is not None:
             try:
                 os.rename(module_dir, module_dir + ".pending_delete")
@@ -1178,12 +1005,6 @@ class PluginManager:
         self.engine.events.emit("modules_changed", module_id)
 
     def _quarantine_locked_files(self, module_dir: str) -> int:
-        """删不净时的逐文件挽救：删得掉的删，删不掉但可改名的挪入隔离区。
-
-        自底向上遍历（叶子先处理，目录清空后即可删除），返回连改名都
-        拒绝的文件数。隔离区为同级 <id>.pending_delete 目录（保持相对
-        结构），由 _sweep_pending_deletes 在下次启动时清扫。
-        """
         trash = module_dir + ".pending_delete"
         stuck = 0
         for cur, dirs, names in os.walk(module_dir, topdown=False):
@@ -1222,7 +1043,6 @@ class PluginManager:
         return stuck
 
     def _mark_auto_cleanup(self, module_dir: str) -> None:
-        """在残留目录里写自动清理标记，供 _sweep_pending_deletes 识别。"""
         try:
             with open(os.path.join(module_dir, _CLEANUP_MARKER), "w",
                       encoding="utf-8") as f:
@@ -1231,13 +1051,6 @@ class PluginManager:
             pass
 
     def _sweep_pending_deletes(self) -> None:
-        """清扫删除残留（delete_module 让位/标记时留下）。
-
-        两类：整目录改名让位的 <id>.pending_delete，与写有
-        _CLEANUP_MARKER 的部分残留目录。调用时机为进程启动后首次
-        discover（上一进程的锁已释放），ignore_errors 兜底杀软瞬时
-        占用——删不净留待下次。
-        """
         for root in module_roots():
             try:
                 entries = os.listdir(root)
@@ -1251,7 +1064,6 @@ class PluginManager:
                         os.path.join(path, _CLEANUP_MARKER)):
                     shutil.rmtree(path, ignore_errors=True)
                     if os.path.isdir(path):
-                        # 仍有占用残留：补回标记，下次启动继续清扫
                         try:
                             with open(os.path.join(path, _CLEANUP_MARKER),
                                       "w", encoding="utf-8") as f:
@@ -1326,7 +1138,6 @@ def _load_plugin_class(module_id: str, plugin_py: str) -> type[ModuleBase]:
         raise RuntimeError(f"模块 {module_id} 未定义 ModuleBase 子类")
 
     if not issubclass(cls, _Base):
-        # 鸭子类型模块：补齐缺失的生命周期方法为空实现
         if not hasattr(cls, "start"):
             cls.start = _noop
         if not hasattr(cls, "stop"):

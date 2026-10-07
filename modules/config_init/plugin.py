@@ -1,15 +1,3 @@
-"""初始化配置模块（内置核心）。
-
-配置文件是核心：
-* 启动装载 —— 宿主 PluginManager 在扫描模块后按各模块 META["config"]
-  声明自动补齐 config/<模块>.json（ensure_all_configs），本模块加载时
-  再次确认全部配置文件就绪；
-* 保存到文件 —— save_all() 将主配置 + 全部模块配置 + 启用状态落盘；
-* 从指定文件载入 —— load_from(path) 支持导出包（bundle）或纯主配置
-  JSON，写盘后重启运行中的模块使新配置立即生效；
-* 导出到指定文件 —— export_to(path) 将 config.json 与 config/ 目录
-  全部 JSON 打包为单个可携带的配置文件。
-"""
 
 META = {
     "id": "config_init",
@@ -53,7 +41,6 @@ class ConfigInitModule(ModuleBase):
     def on_unload(self) -> None:
         self.ctx = None
 
-    # ------------------------------------------------------------ 保存/导出
 
     def save_all(self) -> None:
         manager = self.ctx.engine.modules
@@ -82,10 +69,8 @@ class ConfigInitModule(ModuleBase):
             json.dump(data, f, ensure_ascii=False, indent=2)
         return len(data["files"])
 
-    # -------------------------------------------------------------- 载入
 
     def load_from(self, path: str) -> int:
-        """从导出包（或纯主配置 JSON）载入并写盘，返回应用的文件数。"""
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
@@ -95,7 +80,7 @@ class ConfigInitModule(ModuleBase):
         elif isinstance(data.get("files"), dict):
             files = data["files"]
         else:
-            files = {"config.json": data}   # 纯主配置：按键合并
+            files = {"config.json": data}
 
         manager = self.ctx.engine.modules
         applied = 0
@@ -111,14 +96,12 @@ class ConfigInitModule(ModuleBase):
                 with open(target, "w", encoding="utf-8") as f:
                     json.dump(content, f, ensure_ascii=False, indent=2)
             applied += 1
-        # 磁盘内容已替换：丢弃缓存并按声明重新补齐
         manager._settings_cache.clear()
         manager.ensure_all_configs()
         manager._modules_state = _reload_modules_state(manager)
         return applied
 
     async def restart_running(self) -> list[str]:
-        """重启全部已加载模块，使新配置立即生效。"""
         manager = self.ctx.engine.modules
         restarted: list[str] = []
         for module_id in list(manager._instances):

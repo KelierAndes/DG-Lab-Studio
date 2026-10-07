@@ -119,7 +119,6 @@ class SettingsPage(XamlClass, Page):
         rows.append(W.field_row("手动存取", "载入会写盘并重启运行中的模块立即生效", buttons))
         return self._wrap("配置文件", "核心：启动自动装载 · 手动保存 / 载入 / 导出", rows)
 
-    # ------------------------------------------------------ 模块市场
 
     def _group_market(self) -> object:
         market = self.shell.engine.config.setdefault("modules_market", {})
@@ -148,14 +147,12 @@ class SettingsPage(XamlClass, Page):
 
     def _suggest_row(self, label: str, description: str, value: str,
                      choices, on_commit) -> object:
-        """可输入 + 常用项建议的设置行（输入时列出建议项）。"""
         box = W.suggest_box(text=value, choices=list(choices), width=240,
                             placeholder="留空",
                             on_commit=lambda text: (
                                 None if self._updating else on_commit(text)))
         return W.field_row(label, description, box)
 
-    # ------------------------------------------------------ 初始化配置模块
 
     def _init_module(self):
         manager = self.shell.engine.modules

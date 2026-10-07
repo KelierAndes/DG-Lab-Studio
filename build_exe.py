@@ -15,10 +15,6 @@ RUNTIME_DIRS = ("config",)
 
 APP_VERSION = "0.2.0"
 
-# 分发 zip 的顶层保留项：运行时用户数据（config.json / config/ / 日志）与
-# 下载的联动模块一律不入包——首次运行自动生成配置，联动模块从「模块」页
-# 按需下载。modules/ 仅保留内置核心模块（config_init 是设置页配置
-# 导入/导出的载体，属软件本体）。
 RELEASE_KEEP_TOP = {"DGStudio.exe", "_internal", "_python", "modules"}
 RELEASE_KEEP_MODULES = {"__init__.py", "config_init"}
 
@@ -74,7 +70,6 @@ def main() -> int:
 
 
 def copy_modules(src: Path, dst: Path) -> None:
-    """核心内置模块复制到产物 modules/（合并式：已下载的联动模块目录保留）。"""
     if not src.is_dir():
         print(f"modules/ missing, skip copy: {src}")
         return
@@ -95,12 +90,6 @@ def copy_modules(src: Path, dst: Path) -> None:
 
 
 def make_release_zip(app_dir: Path, version: str) -> Path:
-    """把构建产物压成分发 zip（GitHub Release 资产，不入 git）。
-
-    只含软件本体：exe + _internal + _python + modules/（仅内置核心模块）。
-    排除运行时用户数据（config.json / config/ / *.log——首次运行自动生成）
-    与下载的联动模块（从「模块」页按需下载）。zip 内顶层目录为 DGStudio/。
-    """
     zip_path = app_dir.parent / f"DGStudio_v{version}_win64.zip"
     zip_path.unlink(missing_ok=True)
     count = 0
@@ -109,7 +98,7 @@ def make_release_zip(app_dir: Path, version: str) -> Path:
         for path in sorted(app_dir.rglob("*")):
             if path.is_dir() or "__pycache__" in path.parts:
                 continue
-            parts = path.relative_to(app_dir.parent).parts   # (DGStudio, …)
+            parts = path.relative_to(app_dir.parent).parts
             if parts[1] not in RELEASE_KEEP_TOP:
                 continue
             if (parts[1] == "modules"
@@ -123,15 +112,6 @@ def make_release_zip(app_dir: Path, version: str) -> Path:
 
 
 def ensure_python_payload(app_dir: Path) -> None:
-    """释放随包真实 Python 运行时到产物旁 _python/（模块依赖安装用）。
-
-    打包版不进程内调 pip（PyInstaller 导入系统 hook 会让 pip 内置 distlib
-    崩溃，pip#12841），改为子进程执行真实 Python：embeddable zip 按**构建
-    解释器**的版本从 python.org 下载（_deps 里的 wheel 由宿主解释器导入，
-    ABI 必须一致；缓存于 build/_python_payload/），pip 从构建环境的
-    site-packages 复制（纯 Python，跨解释器可用），并写 _pth 把 pip 目录
-    挂进子解释器的 sys.path（embeddable 默认无任何第三方路径）。
-    """
     major, minor, micro = sys.version_info[:3]
     ver = f"{major}.{minor}.{micro}"
     cache = ROOT / "build" / "_python_payload"
@@ -158,10 +138,6 @@ def ensure_python_payload(app_dir: Path) -> None:
     pth = payload / f"python{major}{minor}._pth"
     pth.write_text(f"python{major}{minor}.zip\n.\npip\n\nimport site\n",
                    encoding="utf-8")
-    # abi3 扩展（如 opencv 5.x 的 cp37-abi3 wheel）静态链接 python3.dll（ABI
-    # 转发层）：冻结包只带 python312.dll，缺它则 "DLL load failed while
-    # importing cv2"。embeddable 自带该 DLL，复制进 _internal（PyInstaller
-    # 的 DLL 搜索目录），全部模块的 _deps 共用。
     internal = app_dir / "_internal"
     if internal.is_dir():
         shutil.copy2(payload / "python3.dll", internal / "python3.dll")

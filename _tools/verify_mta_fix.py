@@ -1,10 +1,3 @@
-"""验证引擎线程 COM 套间与 bleak 的兼容性(蓝牙扫描失败根因)。
-
-场景1: 音频模块先初始化(PortAudio WASAPI → CoInitialize(NULL) = STA)→
-       bleak assert_mta 探测消息泵失败 → BleakError(复现用户报错)。
-场景2: 线程先固定为 MTA(app.py _run_loop 的修复)→ 音频初始化被
-       RPC_E_CHANGED_MODE 挡掉、套间保持 MTA → bleak 通过。
-"""
 import asyncio
 import ctypes
 import threading
@@ -24,10 +17,9 @@ def scenario(name: str, fix_mta_first: bool, with_audio: bool) -> None:
     def run() -> None:
         async def main() -> None:
             if fix_mta_first:
-                ctypes.windll.ole32.CoInitializeEx(None, 0x0)  # COINIT_MULTITHREADED
+                ctypes.windll.ole32.CoInitializeEx(None, 0x0)
             if with_audio:
                 import pyaudiowpatch as pyaudio
-                # 真实场景中音频流在蓝牙扫描期间保持打开,故此处不 terminate
                 pa = pyaudio.PyAudio()
                 result["pa"] = pa
             result["apt"] = apartment_type()

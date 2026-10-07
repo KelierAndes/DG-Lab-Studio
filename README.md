@@ -1,6 +1,6 @@
 # DGStudio — DG-Lab × VRChat OSC 控制台
 
-**DGStudio** 是基于 **Python + WinUI 3** 的 DG-Lab（郊狼 Coyote / 负鼠 OVC / 灵猫 BMTR）控制台，采用**模块化架构**：软件主体只包含核心（设备连接与参数模型），对外联动（VRChat OSC、Alice in Cradle 等）以**联动模块**形式提供——每个模块一个独立仓库（`dgstudio-modules-<模块 id>`，与 AstrBot 插件仓库同模式），由总仓库 [dgstudio-modules-market](https://github.com/KelierAndes/dgstudio-modules-market) 聚合生成市场清单，「模块」页按需下载、实时装卸、热重载。
+**DGStudio** 是基于 **Python + WinUI 3** 的 DG-Lab（郊狼 Coyote / 负鼠 OVC / 灵猫 BMTR）控制台，采用**模块化架构**：软件主体只包含核心（设备连接与参数模型），对外联动（VRChat OSC、Alice in Cradle 等）以**联动模块**形式提供，在「模块」页按需下载、实时装卸、热重载。
 
 ```
 ┌──────────────┐  WebSocket V4 / V3  ┌──────────────────────────┐  OSC (UDP)   ┌────────┐
@@ -50,22 +50,22 @@
 
 ### 联动模块（按需下载 + 热重载）
 
-软件核心**不内置联动模块**。模块市场遵循 AstrBot 插件生态的仓库管理方式：
-每个模块独立仓库（`dgstudio-modules-*`），总仓库的 GitHub Actions 自动
-拉取并解析各子仓库生成市场清单 `market.yaml`，DGStudio「模块」页
-**只读取该清单**——点「获取在线列表」检索、「下载」取回模块文件、
-「安装并启动」即用。安装时自动读取模块仓库的 `requirements.txt` 并 pip
-补装依赖（如 `python-osc`、`opencv-python-headless`），无需手动处理——
+软件核心**不内置联动模块**，在「模块」页点「获取在线列表」检索、
+「下载」取回模块文件、「安装并启动」即用。安装时自动补装模块声明的
+依赖（如 `python-osc`、`opencv-python-headless`），无需手动处理——
 打包版经随包内置的 Python（`_python\`）安装，目标机器无需安装 Python；
 卸载 / 更新即**热重载**生效，无需重启。
 
-当前可用模块（各仓库含模块说明与开发指引）：
+当前可用模块：
 
 | 模块 | 仓库 | 版本 | 说明 |
 |---|---|---|---|
-| **VRChat OSC 联动** | [dgstudio-modules-osc_bridge](https://github.com/KelierAndes/dgstudio-modules-osc_bridge) | 1.5.0 | 头像参数双向映射，用表达式在核心参数与头像参数之间换算 |
-| **Alice in Cradle 联动** | [dgstudio-modules-alice_cradle](https://github.com/KelierAndes/dgstudio-modules-alice_cradle) | 0.6.0 | 从游戏模组读取 HP / MP 等数值，按映射表映射到核心参数 |
-| **画面识别联动** | [dgstudio-modules-vision_link](https://github.com/KelierAndes/dgstudio-modules-vision_link) | 0.3.1 | OpenCV 检测屏幕画面（模板图像 / 数值条 / 数字）产生数值，按映射表映射到核心参数 |
+| **VRChat OSC 联动** | [dgstudio-modules-osc_bridge](https://github.com/KelierAndes/dgstudio-modules-osc_bridge) | 1.11.0 | 头像参数双向映射，用表达式在核心参数与头像参数之间换算 |
+| **Alice in Cradle 联动** | [dgstudio-modules-alice_cradle](https://github.com/KelierAndes/dgstudio-modules-alice_cradle) | 0.6.5 | 从游戏模组读取 HP / MP 等数值，按映射表映射到核心参数 |
+| **画面识别联动** | [dgstudio-modules-vision_link](https://github.com/KelierAndes/dgstudio-modules-vision_link) | 0.3.2 | OpenCV 检测屏幕画面（模板图像 / 数值条 / 数字）产生数值，按映射表映射到核心参数 |
+| **音频联动** | [dgstudio-modules-sound_link](https://github.com/KelierAndes/dgstudio-modules-sound_link) | 0.3.2 | 采集麦克风 / 系统声音输出响度、频率等映射变量，输出频率跟随声音音高（配合「外部脉冲流」波形） |
+| **灵猫边控联动** | [dgstudio-modules-margin_control](https://github.com/KelierAndes/dgstudio-modules-margin_control) | 0.11.0 | 灵猫气压 / 官方边控会话驱动的闭环边控：红线 / 蓝线、持续判定、气压跳变与阈值自适应，达限自动释放 |
+| **手柄震动联动** | [dgstudio-modules-xinput_oscillate](https://github.com/KelierAndes/dgstudio-modules-xinput_oscillate) | 0.2.1 | 经虚拟手柄接收游戏原生 XInput 震动，按映射表派发到核心参数 |
 | **强度日志示例** | [dgstudio-modules-strength_logger](https://github.com/KelierAndes/dgstudio-modules-strength_logger) | 0.1.0 | 演示模块 API：订阅强度变化写入日志（开发模板） |
 
 「初始化配置」为内置核心模块（启动时按各模块声明自动补齐配置文件），随软件分发。各模块的详细说明、安装与配置见各自仓库的 README。

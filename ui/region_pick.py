@@ -1,15 +1,3 @@
-"""屏幕截图选取器：置顶窗口显示当前画面，拖拽选取矩形后自动确认。
-
-``pick_region(on_done)`` → ``on_done([x, y, w, h] | None)``（取消为 None）；
-``pick_crop(on_done)``   → ``on_done((png_bytes, [x, y, w, h]) | None)``。
-
-坐标为**截图图像像素**：与画面识别采集同用 PIL ImageGrab 管线
-（all_screens），截屏 (0,0) 即图像左上角，选取结果无需任何偏移即可直接
-作为检测区域/例图裁剪（进程 DPI 感知为 unaware 时截屏是虚拟化分辨率，
-叠加 GetSystemMetrics 原点会造成双重偏移——正是坐标不准的根源，勿加）。
-窗口关闭（标题栏 ×）即取消；拖拽过小视为无效，可重新拖拽。回调在 UI
-线程执行。
-"""
 
 from __future__ import annotations
 
@@ -38,12 +26,10 @@ _last_error: str = ""
 
 
 def pick_region(on_done) -> None:
-    """区域模式：回调收到 [x, y, w, h]（虚拟屏幕像素）或 None。"""
     _start(on_done, crop_mode=False)
 
 
 def pick_crop(on_done) -> None:
-    """例图模式：回调收到 (png_bytes, [x, y, w, h]) 或 None。"""
     _start(on_done, crop_mode=True)
 
 
@@ -100,7 +86,7 @@ class _PickerWindow(Window):
         self.AppWindow.Resize(SizeInt32(self._wa.Width, self._wa.Height))
 
         self._img = Image()
-        self._img.Stretch = Stretch.Fill  # 外框按截图纵横比设置，无变形
+        self._img.Stretch = Stretch.Fill
         self._rect_el = Rectangle()
         self._rect_el.Stroke = _brush(255, 255, 208, 0)
         self._rect_el.StrokeThickness = 2
@@ -150,7 +136,6 @@ class _PickerWindow(Window):
                 self._finish(None)
         asyncui.create_task(_load())
 
-    # ------------------------------------------------------------ 布局
 
     def _on_loaded(self, sender, args) -> None:
         try:
@@ -164,7 +149,6 @@ class _PickerWindow(Window):
         self._frame.Width = sw * self._f
         self._frame.Height = sh * self._f
 
-    # ------------------------------------------------------------ 选取
 
     def _pos(self, args):
         p = args.GetCurrentPoint(self._img).Position
@@ -205,7 +189,6 @@ class _PickerWindow(Window):
         self._rect_el.Visibility = 0
 
     def _shot_rect(self, release):
-        """拖拽两端（DIP，相对 Image）→ 截图像素 [x, y, w, h]（越界钳制）。"""
         if self._press is None or self._f <= 0:
             return None
         sw, sh = self._shot.size
@@ -219,7 +202,6 @@ class _PickerWindow(Window):
             return None
         return [x0, y0, w, h]
 
-    # ------------------------------------------------------------ 收尾
 
     def _finish(self, shot_rect) -> None:
         self._done = True

@@ -1,8 +1,3 @@
-"""键盘按键注入: 负鼠按键 → 模拟键盘输入 (Windows SendInput).
-
-绑定格式为 "key:<键名>" (如 key:F1 / key:A / key:Space), 键名来自 KEY_NAMES;
-未收录的键以 "VK<hex>" 形式表示, 注入时同样可解析。
-"""
 from __future__ import annotations
 
 import ctypes
@@ -35,7 +30,6 @@ KEY_NAMES[0x12] = "Alt"
 
 NAME_TO_VK = {name.upper(): vk for vk, name in KEY_NAMES.items()}
 
-# 导航簇 / Win 等需要 EXTENDEDKEY 标记, 否则部分程序不识别
 _EXTENDED = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
              0x2C, 0x2D, 0x2E, 0x5B, 0x5C, 0x6F}
 
@@ -54,7 +48,7 @@ class _KEYBDINPUT(ctypes.Structure):
 
 class _INPUTUNION(ctypes.Union):
     _fields_ = (("ki", _KEYBDINPUT),
-                ("padding", ctypes.c_ubyte * 32))   # 容纳 x64 最大的 MOUSEINPUT
+                ("padding", ctypes.c_ubyte * 32))
 
 
 class _INPUT(ctypes.Structure):
@@ -88,7 +82,7 @@ def _send(vk: int, down: bool) -> bool:
         flags |= _KEYEVENTF_EXTENDEDKEY
     if not down:
         flags |= _KEYEVENTF_KEYUP
-    scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0)   # MAPVK_VK_TO_VSC
+    scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0)
     inp = _INPUT()
     inp.type = _INPUT_KEYBOARD
     inp.union.ki = _KEYBDINPUT(vk, scan, flags, 0, None)
@@ -104,7 +98,6 @@ def _send(vk: int, down: bool) -> bool:
 
 
 def foreground_window() -> str:
-    """当前前台窗口标题 (注入目标)。仅用于日志诊断."""
     try:
         hwnd = ctypes.windll.user32.GetForegroundWindow()
         if not hwnd:
@@ -117,7 +110,6 @@ def foreground_window() -> str:
 
 
 def press(name: str) -> bool:
-    """按下绑定的键盘键 (负鼠按键按下沿)."""
     vk = vk_from_name(name)
     if vk is None:
         log.warning("未知按键名: %r", name)
@@ -126,7 +118,6 @@ def press(name: str) -> bool:
 
 
 def release(name: str) -> bool:
-    """抬起绑定的键盘键 (负鼠按键抬起沿)."""
     vk = vk_from_name(name)
     if vk is None:
         return False

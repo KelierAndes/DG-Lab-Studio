@@ -289,8 +289,6 @@ class ConnectPage(XamlClass, Page):
             else:
                 label = "未启用"
                 fg, bg = ("text3", "track")
-            # pill 签名缓存:内容不变不重建(此前每 tick 新建 XAML 对象,
-            # 心跳频率下是连接页卡顿的最大来源)
             sig = (label, fg, bg)
             if refs.get("pill_sig") == sig:
                 continue

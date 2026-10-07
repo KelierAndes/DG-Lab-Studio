@@ -83,16 +83,12 @@ class MainWindow(XamlClass, Window):
         self._missing_prompt: dict | None = None
 
         timer = self.DispatcherQueue.CreateTimer()
-        # UI 心跳 100ms:泵 ui_queue + 当前页 tick(各页内部另有 0.2~0.5s
-        # 数据刷新节流)。此前 10ms 会让跨 COM 的 XAML 属性写放大 10 倍,
-        # 是连接/控制/联动页卡顿的公共放大器。
         timer.Interval = TimeSpan(Duration=1_000_000)
         timer.IsRepeating = True
         timer.Tick += self._on_tick
         timer.Start()
 
         async def _startup_check() -> None:
-            # 引擎的模块自启动可能早于窗口订阅事件，这里兜底再查一次映射
             engine._check_missing_bindings()
 
         self.submit(_startup_check())
@@ -160,7 +156,6 @@ class MainWindow(XamlClass, Window):
         self.ui_queue.put(_run)
 
     def _notify_all(self) -> None:
-        """重建全部已构造页面（模块装卸等影响多页的变更用）。"""
         for page in list(self._pages.values()):
             method = getattr(page, "on_notify", None)
             if method is not None:

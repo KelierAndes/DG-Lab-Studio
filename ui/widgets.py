@@ -511,7 +511,6 @@ def dropdown(label: str, choices, *, selected: int = 0, width: float | None = No
 
 def slider(minimum: float, maximum: float, value: float, *, step: float = 1.0,
            width: float | None = None, on_change=None, on_commit=None) -> Slider:
-    """数值滑块：拖动中回调 on_change，松手（或 WinUI 事件缺失时即时）回调 on_commit。"""
     s = Slider()
     s.Minimum = float(minimum)
     s.Maximum = float(maximum)
@@ -527,17 +526,11 @@ def slider(minimum: float, maximum: float, value: float, *, step: float = 1.0,
         try:
             s.DragCompleted += lambda sender, args: on_commit(float(s.Value))
         except Exception:
-            # 绑定层缺少 DragCompleted 时退回即时提交
             s.ValueChanged += lambda sender, args: on_commit(float(args.NewValue))
     return s
 
 def suggest_box(*, text: str = "", choices=None, placeholder: str = "",
                 width: float | None = None, on_commit=None) -> AutoSuggestBox:
-    """可任意输入、可从预定义项中选择的编辑框。
-
-    预定义项在首次用户输入时才填充：联动页每行一个输入框，逐项 Append
-    数千个联想项会让页面重建明显卡顿。
-    """
     box = AutoSuggestBox()
     box.Text = text
     if placeholder:
@@ -556,9 +549,6 @@ def suggest_box(*, text: str = "", choices=None, placeholder: str = "",
             box.Items.Append(str(choice))
 
     def _collapse() -> None:
-        # 联想列表只应由用户输入打开：WinUI 在持焦状态下填充 Items /
-        # 重新聚焦时会自动展开列表（点击输入框误弹下拉的来源），需收起；
-        # 再排一拍兜底，防框架在本处理器之后才展开
         try:
             box.IsSuggestionListOpen = False
         except Exception:
@@ -571,7 +561,7 @@ def suggest_box(*, text: str = "", choices=None, placeholder: str = "",
 
     def _text_changed(sender, args) -> None:
         try:
-            user_input = int(args.Reason) == 0    # AutoSuggestionBoxTextChangeReason.UserInput
+            user_input = int(args.Reason) == 0
         except Exception:
             user_input = True
         if user_input:
@@ -1003,4 +993,3 @@ def hold_border(label: str, *, width: float = 180) -> tuple[Border, TextBlock]:
         h="center",
     )
     return b, label_tb
-

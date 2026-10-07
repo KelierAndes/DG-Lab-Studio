@@ -26,9 +26,6 @@ class DashboardPage(XamlClass, Page):
         now = time.monotonic()
         if now - self._last < 0.4:
             return
-        # 结构签名（设备集合/模块生命周期）变了才整页重建；state 对象每次
-        # _publish 都换新（BLE 强度通知 10Hz），以对象身份作触发会造成
-        # 0.4s 一次、单次近 1s 的全页 XAML 重建（卡顿最大来源）
         state_sig = self._state_sig()
         mod_sig = live.module_data_sig(shell.engine)
         if state_sig == self._state_seen and mod_sig == self._mod_sig:
@@ -42,8 +39,6 @@ class DashboardPage(XamlClass, Page):
                 tuple(sorted((sid, s.type) for sid, s in st.slots.items())))
 
     def _refresh_live_rows(self) -> None:
-        """数据值卡与设备卡的 live 数值刷新：行集合不变时只改文本/meter
-        （跨 COM 写最小化），行集合变化则整页重建。"""
         engine, state = self.shell.engine, self.shell.state
         lines = live.input_value_rows(engine, state)
         if [(l["kind"], l["name"]) for l in lines] \
@@ -367,7 +362,6 @@ class DashboardPage(XamlClass, Page):
         return W.box(height=48, child=g, h="stretch")
 
     def _module_channel_row(self, entry: dict) -> object:
-        """联动模块通道行：名称 + 映射数 | 启用 pill + 探活 pill。"""
         ok = entry.get("probe_ok")
         if ok is True:
             pfg, pbg = "success", "success_soft"

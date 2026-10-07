@@ -1,9 +1,3 @@
-"""复现 delete_module 的锁定场景,确定可用的删除/转移策略。
-
-用 ctypes.WinDLL 映射 _deps 内的 DLL(与已导入 .pyd 同为映像锁),依次测试:
-rmtree / 整目录改名 / 锁定文件原位改名 / 锁定文件跨目录改名。
-测试产生的改名一律还原。
-"""
 import ctypes
 import os
 import shutil
@@ -34,13 +28,13 @@ def main():
 
     def rename_dir():
         os.rename(BASE, BASE + ".t")
-        os.rename(BASE + ".t", BASE)   # 立即还原
+        os.rename(BASE + ".t", BASE)
         return True
 
     def rename_file_inplace():
         dst = DLL + ".t"
         os.rename(DLL, dst)
-        os.rename(dst, DLL)            # 立即还原
+        os.rename(dst, DLL)
         return True
 
     print("rmtree 整树删除:")

@@ -550,7 +550,6 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine.stop()
 
     async def test_fire_channel_strengths_separate(self):
-        """通道分离：A/B 开火强度独立取值（0 = 跟随上限），互不影响。"""
         engine = self._engine()
         try:
             seen: list = []
@@ -566,30 +565,26 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
                                                             "channelB": {"intensityMax": 120}}}])
             engine._backend = backend
             engine.config["fire_strength_a"] = 40
-            engine.config["fire_strength_b"] = 0  # 0 = 跟随最大强度上限 (100)
+            engine.config["fire_strength_b"] = 0
             await engine.fire(slot_id="s1", duration_s=0.01)
             self.assertEqual(seen[-1], ({"A": 40, "B": 100}, ("A", "B")))
 
-            # 旧版双通道 fire_strength 仍作两通道的兜底
             engine.config["fire_strength_a"] = 0
             engine.config["fire_strength_b"] = 0
             engine.config["fire_strength"] = 55
             await engine.fire(slot_id="s1", duration_s=0.01)
             self.assertEqual(seen[-1], ({"A": 55, "B": 55}, ("A", "B")))
 
-            # 设备级覆盖优先于全局
             engine.config.setdefault("device_settings", {})["s1"] = {
                 "fire_strength_a": 66}
             await engine.fire(slot_id="s1", duration_s=0.01)
             self.assertEqual(seen[-1], ({"A": 66, "B": 55}, ("A", "B")))
 
-            # 每通道各自钳制到本通道上限（A 上限 200 / B 上限 120）
             engine.config["device_settings"]["s1"] = {
                 "fire_strength_a": 0, "fire_strength_b": 150}
             await engine.fire(slot_id="s1", duration_s=0.01)
             self.assertEqual(seen[-1], ({"A": 100, "B": 120}, ("A", "B")))
 
-            # intensity_params 公开快照同时给出 A/B 与遗留键（0 = 跟随上限哨兵保留）
             params = engine.intensity_params("s1")
             self.assertEqual(params["fire_strength_a"], 0)
             self.assertEqual(params["fire_strength_b"], 150)
@@ -642,7 +637,6 @@ class EngineCommandTests(unittest.IsolatedAsyncioTestCase):
             engine.stop()
 
     async def test_fire_hold_per_channel(self):
-        """通道分离：只开火 A 通道时 B 通道强度与波形都不受影响。"""
         engine = self._engine()
         try:
             added: list[tuple] = []
@@ -868,14 +862,13 @@ class SavedDeviceTests(unittest.IsolatedAsyncioTestCase):
 
 class FrameLogTests(unittest.IsolatedAsyncioTestCase):
     async def test_v4_no_frame_log_but_error_reported(self):
-        # 帧级日志已移除(高频写盘卡顿);指令错误仍以运行日志提示
         client = SocketV4Client(events=StateEvents())
         logs: list[str] = []
         client.events.on("log", logs.append)
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
         client._handle_frame({"type": "message",
                               "data": {"t": "resp", "strength": 20}})
-        self.assertEqual(logs, [])            # 正常帧不产生任何日志
+        self.assertEqual(logs, [])
         client._handle_frame({"type": "message",
                               "data": {"t": "resp", "error": "bad req",
                                        "reqId": 7}})
@@ -1147,7 +1140,6 @@ class DeviceSettingTests(unittest.IsolatedAsyncioTestCase):
             engine.stop()
 
     async def test_frame_logging_removed(self):
-        # log_frame 接口与 frame_log 事件不复存在(用户指示:不记录帧信息)
         engine = self._engine()
         try:
             self.assertFalse(hasattr(engine, "log_frame"))

@@ -1,9 +1,3 @@
-"""模块宿主（plugins.py）与强度参数公开 API 回归测试。
-
-联动模块已外置到 dgstudio-modules-market 仓库；本文件用临时写入的夹具模块
-（fixture）覆盖宿主逻辑：发现、装载、动作注册、配置声明补齐、
-配置迁移、游戏模组释放与导出/载入。
-"""
 from __future__ import annotations
 
 import io
@@ -37,7 +31,6 @@ class _FakeEngine:
         from dglab.state import StateEvents
 
         self.events = StateEvents()
-        # 每个实例独立临时目录，避免测试间共享 config/ 造成串扰
         self.config = _FakeConfig(
             os.path.join(tempfile.mkdtemp(prefix="dgstudio_test_"), "config.json"))
         self._logs: list[str] = []
@@ -50,8 +43,6 @@ class _FakeEngine:
 
         return asyncio.run_coroutine_threadsafe(coro, asyncio.new_event_loop())
 
-
-# ------------------------------------------------------------- 夹具模块写入
 
 def _write_module(root: str, module_id: str, meta: dict, body: str = "",
                   files: dict[str, bytes] | None = None) -> str:
@@ -67,7 +58,6 @@ def _write_module(root: str, module_id: str, meta: dict, body: str = "",
     return folder
 
 
-# 哑类型模块：鸭子类型（不继承 ModuleBase），验证宿主协议兼容
 _DUMMY_META = {"id": "dummy", "name": "哑模块", "version": "0.2.0",
                "description": "鸭子类型最小模块。"}
 _DUMMY_BODY = '''
@@ -88,8 +78,6 @@ class DummyModule:
         return True
 '''
 
-# 动作模块：ModuleBase 子类 + 按键动作 + 配置声明（settings_key=osc，
-# 与旧版真实模块同键，便于迁移与绑定校验测试沿用同一绑定值）
 _ACTOR_META = {"id": "actor", "name": "动作模块", "version": "1.0.0",
                "description": "带按键动作与配置声明的模块。",
                "settings_key": "osc", "actions": ["osc"],
@@ -136,13 +124,11 @@ class ActorModule(ModuleBase):
             on_release=lambda slot_id, arg: None)]
 '''
 
-# 游戏模组携带模块：META["mods"] 声明 + mods/ 假 DLL + vendor/ 假发行包
 _CARRIER_META = {"id": "carrier", "name": "模组携带", "version": "0.1.0",
                  "description": "携带游戏端模组的模块。",
                  "mods": {"dest": "BepInEx/plugins/AliceInCradleLink",
                           "marker": "AliceInCradle.exe"}}
 
-# 事件流/临时变量接口模块：META temps 声明 + bridge.engine（MappingEngine）
 _LOGIC_META = {"id": "logic", "name": "事件模块", "version": "0.1.0",
                "description": "声明临时变量的模块。",
                "temps": [{"key": "count", "label": "计数",
@@ -189,7 +175,6 @@ def _write_fixtures(root: str) -> None:
 
 
 class _FixtureRoots:
-    """把 plugins.module_roots 指到写入夹具模块的临时目录。"""
 
     def __init__(self):
         self.root = tempfile.mkdtemp(prefix="dgstudio_mods_")
@@ -233,7 +218,6 @@ class ModuleDiscoveryTests(unittest.TestCase):
         self.assertIsInstance(instance, ModuleBase)
         self.assertEqual(instance.id, "actor")
         self.assertTrue(self.manager.meta("actor")["loaded"])
-        # on_load 回填模块设置文件默认值
         self.assertEqual(self.manager.settings_for("actor").get("rate_hz"), 10)
 
     def test_load_duck_typed_module(self):
@@ -259,8 +243,6 @@ class ModuleDiscoveryTests(unittest.TestCase):
         self.assertFalse(self.manager.is_enabled("actor"))
 
     def test_list_meta_enabled_reflects_default(self):
-        # discover 缓存的 enabled 必须回落到 META default_enabled，
-        # 否则未显式记录的模块在模块页显示「已停用」
         self.assertTrue(self.manager.meta("actor")["enabled"])
         self.assertFalse(self.manager.meta("dummy")["enabled"])
         self.manager.set_enabled("actor", False)
@@ -276,7 +258,6 @@ class ModuleDiscoveryTests(unittest.TestCase):
                          ["some-pkg>=1.0"])
 
     def test_unload_purges_import_cache_for_hot_reload(self):
-        # 装载 → 卸载 → 改写模块代码 → 再装载：新代码生效（安装/卸载热重载）
         root = self._roots.root
         _write_module(root, "dummy",
                       {"id": "dummy", "name": "哑模块", "version": "0.1.0",
@@ -324,7 +305,7 @@ class ModuleDiscoveryTests(unittest.TestCase):
         self.assertNotIn("osc", engine.config)
         self.assertNotIn("modules", engine.config)
         self.assertTrue(engine.config.saved)
-        self.assertFalse(manager.is_enabled("actor"))  # 旧 enabled=False → 显式关闭
+        self.assertFalse(manager.is_enabled("actor"))
         osc = manager.settings_for("actor")
         self.assertEqual(osc.get("rate_hz"), 25)
         self.assertNotIn("enabled", osc)
@@ -457,7 +438,7 @@ class BindingProfileCheckTests(unittest.TestCase):
             self.engine.events.on("binding_modules_missing",
                                   lambda payload: events.append(payload))
             self.engine.modules.load("actor")
-            self.assertEqual(events, [])  # 加载只会消除缺失，不触发提示
+            self.assertEqual(events, [])
             fut = asyncio.run_coroutine_threadsafe(
                 self.engine.modules.unload("actor"), self.engine.loop)
             fut.result(timeout=10)
@@ -493,7 +474,6 @@ class BindingProfileCheckTests(unittest.TestCase):
 
 
 class ConfigDrivenTests(unittest.TestCase):
-    """配置声明自动装载回归（夹具模块 META["config"]）。"""
 
     def setUp(self):
         self._roots = _FixtureRoots()
@@ -504,8 +484,6 @@ class ConfigDrivenTests(unittest.TestCase):
         self.engine.modules = self.manager
 
     def test_declared_defaults_auto_filled_on_discover(self):
-        # 声明的常规键自动补齐;映射表时代的 mappings/outputs 即便声明了
-        # 也被清除（事件流是唯一数据面，配置里确保无此项）
         osc = self.manager.settings_for("actor")
         self.assertIn("rate_hz", osc)
         self.assertEqual(osc["rate_hz"], 10)
@@ -531,7 +509,6 @@ class ConfigDrivenTests(unittest.TestCase):
 
 
 class ConfigInitModuleTests(unittest.TestCase):
-    """初始化配置模块：导出包 / 载入恢复。"""
 
     def setUp(self):
         self._roots = _FixtureRoots()
@@ -587,14 +564,12 @@ class ConfigInitModuleTests(unittest.TestCase):
         path = self._tmp("partial.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"some_key": 9100}, f)
-        # 作为主配置载入后，模块声明缺省仍在（模块文件未被该文件覆盖）
         self.inst.load_from(path)
         self.assertEqual(self.engine.config["some_key"], 9100)
         self.assertEqual(self.manager.settings_for("actor")["rate_hz"], 10)
 
 
 class GameModTests(unittest.TestCase):
-    """模块携带游戏端模组：META 声明、mods/ 目录与一键释放安装。"""
 
     def setUp(self):
         self._roots = _FixtureRoots()
@@ -686,8 +661,6 @@ class GameModTests(unittest.TestCase):
             [os.path.normcase(os.path.realpath(game))])
 
     def test_module_context_game_mod_api(self):
-        # 通用接口：任意携带 META["mods"] 的模块经 ModuleContext 即得
-        # 查载荷 / 扫游戏 / 释放安装三个原语（BepInEx 由模块 vendor/ 提供）
         ctx = ModuleContext(self.engine, SimpleNamespace(id="carrier"))
         self.assertTrue(ctx.game_mods_dir())
         root = tempfile.mkdtemp(prefix="dgstudio_game_")
@@ -705,7 +678,6 @@ class GameModTests(unittest.TestCase):
 
 
 class EventTempInterfaceTests(unittest.TestCase):
-    """事件流/临时变量接口：META temps 声明、宿主装载、ctx 读写、事件动作。"""
 
     def setUp(self):
         self._roots = _FixtureRoots()
@@ -745,7 +717,6 @@ class EventTempInterfaceTests(unittest.TestCase):
         self.assertEqual(inst.engine._temp_table,
                          [{"name": "count", "expr": "{count}+1"}])
         self.assertEqual([c["name"] for c in inst.engine._cards], ["拍"])
-        # 临时变量空间与引擎共享：装载求值 count=1，事件动作引用它
         inst.engine.tick_event_cards(0.0)
         self.assertEqual(inst.sent, [("in_fire", 1)])
         self.assertEqual(self.manager.get_temp("logic", "count"), 1.0)
@@ -760,12 +731,11 @@ class EventTempInterfaceTests(unittest.TestCase):
     def test_load_resets_temps_space(self):
         self.manager.set_temp("logic", "x", 1)
         self.assertEqual(self.manager.get_temp("logic", "x"), 1.0)
-        self.manager.load("logic")           # （重新）装载 = 临时变量空间清零
+        self.manager.load("logic")
         self.assertEqual(self.manager.temps_space("logic"), {})
 
 
 class LegacyPurgeTests(unittest.TestCase):
-    """映射表时代设置项的彻底清除（用户指示：不迁移，事件流是唯一数据面）。"""
 
     def setUp(self):
         self._roots = _FixtureRoots()
@@ -789,17 +759,14 @@ class LegacyPurgeTests(unittest.TestCase):
         cfg["events"] = [{"name": "帧事件流", "trigger": "if",
                           "arg": "{Hurt} > 0", "actions": []}]
         self.manager._purge_legacy_tables("logic", cfg)
-        # 键整体删除（不是置空）：配置列表确保无此项
         self.assertNotIn("mappings", cfg)
         self.assertNotIn("outputs", cfg)
-        # 用户自建事件流配置原样保留，不转换
         self.assertEqual(cfg["temps"],
                          [{"name": "HLost", "expr": "{HPmax} - {HP}"}])
         self.assertEqual([e["name"] for e in cfg["events"]], ["帧事件流"])
         self.assertTrue(any("清除遗留" in m for m in self.engine._logs))
 
     def test_keys_removed_even_when_empty(self):
-        # 模块声明默认补齐的空键也洗掉,确保配置列表无此项
         cfg = self.manager.settings_for("logic")
         cfg["mappings"] = []
         cfg["outputs"] = []
@@ -808,8 +775,6 @@ class LegacyPurgeTests(unittest.TestCase):
         self.assertNotIn("outputs", cfg)
 
     def test_first_generation_migration_artifacts_cleaned(self):
-        # 早期自动迁移的产物（输入映射（迁移）卡片 + map_* 临时行）一并清除,
-        # 用户自建事件流引用的变量不受影响
         cfg = self.manager.settings_for("logic")
         cfg.pop("mappings", None)
         cfg.pop("outputs", None)
@@ -828,14 +793,12 @@ class LegacyPurgeTests(unittest.TestCase):
         self.assertNotIn("mappings", cfg)
         self.assertEqual([e["name"] for e in cfg["events"]], ["帧事件流"])
         self.assertEqual([t["name"] for t in cfg["temps"]], ["HLost"])
-        # 幂等
         before = json.dumps(cfg, ensure_ascii=False, default=str)
         self.manager._purge_legacy_tables("logic", cfg)
         self.assertEqual(json.dumps(cfg, ensure_ascii=False, default=str),
                          before)
 
     def test_stale_event_actions_purged(self):
-        # 引用已下线核心参数（如瞬时脉冲 in_zap_*）的事件动作被清除
         cfg = self.manager.settings_for("logic")
         cfg["events"] = [{"name": "拍", "trigger": "period", "arg": 50,
                           "actions": [
@@ -846,14 +809,12 @@ class LegacyPurgeTests(unittest.TestCase):
                                "type": "Int"}]}]
         self.manager._purge_stale_event_actions("logic", cfg)
         kept = cfg["events"][0]["actions"]
-        # in_zap_a 清除;in_fire 保留;输出动作不在清洗范围
         self.assertEqual([(a["dir"], a["param"]) for a in kept],
                          [("in", "in_fire"), ("out", "COYOTE.Battery")])
         self.assertTrue(any("已下线核心参数" in m
                             for m in self.engine._logs))
 
     def test_dashboard_filters_unused_signals(self):
-        # 主页输入数据值只显示被事件流/临时变量引用的参数
         from ui.live import input_value_rows
         inst = self.manager.load("logic")
         cfg = self.manager.settings_for("logic")
@@ -863,8 +824,8 @@ class LegacyPurgeTests(unittest.TestCase):
                                        "var": "Orgasming"}]}]
         self.manager.apply_logic_tables("logic")
         inst.engine.signal("HP", 60)
-        inst.engine.signal("Heal", 5)            # 未被引用 → 不上表
-        inst.engine.signal("Orgasming", 1)       # 被动作引用 → 上表
+        inst.engine.signal("Heal", 5)
+        inst.engine.signal("Orgasming", 1)
 
         class _State:
             slots = {}
@@ -872,10 +833,10 @@ class LegacyPurgeTests(unittest.TestCase):
         rows = input_value_rows(self.engine, _State())
         shown = {r["name"] for r in rows}
         self.assertIn("Orgasming", shown)
-        self.assertIn("HP", shown)               # 临时变量表达式引用
-        self.assertIn("HLost", shown)            # 临时变量本身
+        self.assertIn("HP", shown)
+        self.assertIn("HLost", shown)
         self.assertNotIn("Heal", shown)
-        self.assertNotIn("HPmax", shown)         # 被引用但从未收到数据 → 无行
+        self.assertNotIn("HPmax", shown)
 
 
 if __name__ == "__main__":

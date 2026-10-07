@@ -1,9 +1,3 @@
-"""手工联调用的最小 DGStudio 端：只跑 alice_cradle 数据服务（纯新协议）。
-
-没有真实设备时用它验证 Unity 模组侧的 HTTP 行为：
-    .venv/Scripts/python.exe _tools/hub_stub.py
-POST /data 的命名数值进入映射引擎，命中表达式的动作会打印出来。
-"""
 from __future__ import annotations
 
 import asyncio

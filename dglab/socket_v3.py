@@ -21,8 +21,6 @@ _FEEDBACK_RE = re.compile(r"^feedback-(\d+)$")
 
 CHANNEL_NUM = {"A": 1, "B": 2}
 
-# 外部脉冲流（V3 为尽力而为）：协议只能整段替换波形，故缓存推入的帧并按
-# 节流周期把最近窗口整段下发（App 以该时长播放，窗口衔接近似实时）。
 PULSE_WINDOW_FRAMES = 20
 PULSE_SEND_S = 1.0
 
@@ -221,7 +219,6 @@ class SocketV3Client:
         if not self.state.paired:
             raise RuntimeError("V3 尚未与 App 完成配对")
         if waveform == PULSE_STREAM:
-            # 选中外部脉冲流：清空该通道脉冲缓存与 App 队列，等待模块推流
             self._pulse_buf.pop(channel, None)
             self._pulse_last.pop(channel, None)
             await self._send({"type": 4, "channel": CHANNEL_NUM[channel],
@@ -240,11 +237,6 @@ class SocketV3Client:
         )
 
     async def push_pulse_frame(self, slot_id: str, channel: str, frame: str) -> None:
-        """外部脉冲流（V3 尽力而为）：缓存推入帧并按节流周期整段重发最近窗口。
-
-        V3 协议只能整段替换波形、无法逐帧追加，故每秒把最近
-        ``PULSE_WINDOW_FRAMES`` 帧以两倍窗口时长下发（App 内循环衔接），
-        实时性弱于蓝牙 / V4 直连。未配对时静默丢弃。"""
         if not self.state.paired:
             return
         buf = self._pulse_buf.setdefault(channel, deque(maxlen=100))

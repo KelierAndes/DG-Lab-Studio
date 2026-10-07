@@ -1,9 +1,3 @@
-"""module_store 单测：依赖探测、market.yaml 解析、子仓库 zip / 逐文件下载、
-requirements.txt 依赖来源、模块自带 wheels 合并、冻结态安装与热重载支撑。
-
-下载链路用 file:// 指向临时目录模拟的子仓库 zip（与 codeload 同布局），
-不打真实网络；模块根同样指到临时目录，避免污染仓库。
-"""
 from __future__ import annotations
 
 import os
@@ -60,12 +54,6 @@ def _file_url(path: str) -> str:
 
 
 def _mapped_pyd(path: str):
-    """把真实 .pyd 映射进测试进程，模拟「扩展已 import」的映像锁。
-
-    拷贝标准库 _queue.pyd 落位后 ctypes 加载：文件删除被拒（映像保留到
-    进程退出）、所在目录仍可重命名——与运行中的宿主一致。普通打开句柄
-    不含 FILE_SHARE_DELETE，连目录重命名都会被挡，比真实情形更严，不能用。
-    """
     import ctypes
     import _queue
 
@@ -82,7 +70,6 @@ def _unmap(lib) -> None:
 
 
 def _stage_runtime(base: str) -> str:
-    """在 base 下伪造 exe 旁 _python/python.exe，模拟打包态载荷就位。"""
     py_dir = os.path.join(base, "_python")
     os.makedirs(py_dir, exist_ok=True)
     with open(os.path.join(py_dir, "python.exe"), "wb") as f:
@@ -97,8 +84,6 @@ def _frozen_exe(base: str):
 
 def _make_sub_repo_zip(path: str, repo: str, module_id: str,
                        version: str, requirements: str = "") -> None:
-    """生成与 codeload 布局一致的子仓库 zip：
-    <repo>-<branch>/modules/<id>/…（模块本体在嵌套目录）。"""
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr(f"{repo}-main/README.md", f"# {repo}\n")
         zf.writestr(
@@ -157,7 +142,6 @@ class RequirementCheckTests(unittest.TestCase):
             "dgstudio-definitely-not-a-package>=1.0"))
 
     def test_satisfied_via_import_mapping(self):
-        # opencv-python-headless 的 import 名是 cv2（packages_distributions 映射）
         self.assertTrue(requirement_satisfied("opencv-python-headless>=4.0"))
 
     def test_version_key_orders(self):
@@ -167,13 +151,6 @@ class RequirementCheckTests(unittest.TestCase):
 
 
 class EmbeddedPythonTests(unittest.TestCase):
-    """打包运行时依赖安装走随包真实 Python 子进程。
-
-    回归背景：冻结进程内 import pip 会撞 PyInstaller 导入系统 hook（pip 内置
-    distlib 识别不了冻结加载器，装任何 wheel 都抛 DistlibException，
-    vision_link 的 opencv-python-headless 首次踩中）——打包分支必须保持
-    子进程形态，不得回到进程内 pip。
-    """
 
     def test_embedded_python_empty_when_not_frozen(self):
         self.assertEqual(_embedded_python_dir(), "")
@@ -218,7 +195,6 @@ class EmbeddedPythonTests(unittest.TestCase):
         self.assertEqual(seen["cmd"][seen["cmd"].index("--target") + 1],
                          target)
         self.assertIn("python-osc>=1.9", seen["cmd"])
-        # PYTHON* 环境变量不透传，PIP 变量注入
         env = seen["kwargs"]["env"]
         self.assertTrue(all(not k.upper().startswith("PYTHON")
                             for k in env))
@@ -247,9 +223,6 @@ class EmbeddedPythonTests(unittest.TestCase):
         self.assertIn("内置 Python", out)
 
     def test_frozen_ensure_dependencies_recheck_uses_deps_dir(self):
-        # 首次安装时 _deps 尚不存在：装完的复核必须按新建的 _deps 元数据
-        # 判定（extra 在 makedirs 后刷新）。历史缺陷：复核沿用装前算好的
-        # 空 extra → 冻结宿主自身环境查不到新装包，装成功也误报依赖失败。
         base = tempfile.mkdtemp(prefix="dgstudio_embedpy_")
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         _stage_runtime(base)
@@ -327,7 +300,6 @@ class MarketParseTests(unittest.TestCase):
 
 
 class MarketSettingsTests(unittest.TestCase):
-    """设置页市场源/加速前缀/代理配置 → 下载器行为。"""
 
     def setUp(self):
         self.modules_root = tempfile.mkdtemp(prefix="dgstudio_mods_")
@@ -369,7 +341,6 @@ class MarketSettingsTests(unittest.TestCase):
         self.assertTrue(urls[0].startswith(
             "https://ghfast.top/https://raw.githubusercontent.com/"))
         self.assertIn("/dgstudio-modules-market/main/market.yaml", urls[0])
-        # 镜像源与 API 不套加速前缀
         self.assertTrue(urls[1].startswith("https://raw.githubusercontent.com/"))
         self.assertTrue(urls[2].startswith("https://cdn.jsdelivr.net/"))
         self.assertTrue(urls[3].startswith("https://api.github.com/"))
@@ -403,18 +374,12 @@ class MarketSettingsTests(unittest.TestCase):
 
 
 class OnlineSectionStateTests(unittest.TestCase):
-    """模块页在线区状态机回归：页面必须以 store 为唯一数据源。
-
-    （历史缺陷：页面曾持有独立的 _entries 副本且从未同步，导致日志显示
-    获取成功、页面却始终渲染「未获取」占位。）
-    """
 
     def test_idle_before_any_fetch(self):
         store = SimpleNamespace(entries=[], fetched_at=0.0, last_error="")
         self.assertEqual(online_section_state(store), ("idle", []))
 
     def test_ready_after_successful_fetch(self):
-        # fetch_market 成功：store.entries 已填充 → 页面必须渲染卡片
         store = SimpleNamespace(
             entries=[{"id": "osc_bridge", "version": "1.5.0"}],
             fetched_at=1.0, last_error="")
@@ -434,7 +399,6 @@ class OnlineSectionStateTests(unittest.TestCase):
 
 class DownloadTests(unittest.TestCase):
     def setUp(self):
-        # 模块根指到临时目录：下载/发现的读写都不碰真实仓库
         self.modules_root = tempfile.mkdtemp(prefix="dgstudio_mods_")
         self.addCleanup(shutil.rmtree, self.modules_root, ignore_errors=True)
         patcher = unittest.mock.patch(
@@ -452,7 +416,6 @@ class DownloadTests(unittest.TestCase):
 
     def _fake_market(self, module_id: str, version: str,
                      *, zip_ok: bool = True, requirements: str = "") -> None:
-        """布置 file:// 市场：market.yaml + 子仓库 zip（可置坏）。"""
         repo = f"dgstudio-modules-{module_id}"
         market_path = os.path.join(self.tmp, "market.yaml")
         with open(market_path, "wb") as f:
@@ -464,7 +427,6 @@ class DownloadTests(unittest.TestCase):
         else:
             zip_url = _file_url(os.path.join(self.tmp, "missing.zip"))
 
-        # 逐文件回退用：模块目录文件直接铺在 files/ 下（带嵌套前缀）
         files_dir = os.path.join(self.tmp, "files")
         mod_files = os.path.join(files_dir, "modules", module_id)
         os.makedirs(mod_files, exist_ok=True)
@@ -496,7 +458,6 @@ class DownloadTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(dest, "plugin.py")))
         self.assertTrue(os.path.isfile(os.path.join(dest, "extra", "inner.py")))
         self.assertFalse(os.path.exists(dest + ".downloading"))
-        # 再次下载（更新）覆盖旧目录
         self.store.download("sample")
         self.assertTrue(os.path.isfile(os.path.join(dest, "plugin.py")))
 
@@ -513,7 +474,6 @@ class DownloadTests(unittest.TestCase):
             self.store.download("ghost")
 
     def test_requirements_from_txt_beats_meta(self):
-        # requirements.txt 随模块下载落盘，安装时由宿主读取
         self._fake_market("sample", "1.0.0", requirements="python-osc>=1.9\n")
         self.store.fetch_market()
         self.store.download("sample")
@@ -521,7 +481,6 @@ class DownloadTests(unittest.TestCase):
         reqs, source = self.store.requirements_of("sample")
         self.assertEqual(source, "requirements.txt")
         self.assertEqual(reqs, ["python-osc>=1.9"])
-        # venv 已装 python-osc → 无缺失；换成一个不存在的包名再验
         missing = self.store.missing_dependencies("sample")
         self.assertEqual(missing, [])
         path = self.store.requirements_path("sample")
@@ -535,14 +494,11 @@ class DownloadTests(unittest.TestCase):
         self.store.fetch_market()
         self.store.download("sample")
         self.manager.discover()
-        # 模块无 requirements.txt → META 声明（此处为空）
         reqs, source = self.store.requirements_of("sample")
         self.assertEqual(source, "META")
         self.assertEqual(reqs, [])
 
     def test_update_with_locked_old_files_defers_cleanup(self):
-        # 更新链路：目录重命名不受映像锁影响，旧目录整体让位；被占用的
-        # 残留转 .pending_delete 留待下次启动清扫（与 delete 同语义）
         self._fake_market("sample", "1.0.0")
         self.store.fetch_market()
         self.store.download("sample")
@@ -557,18 +513,12 @@ class DownloadTests(unittest.TestCase):
         with open(os.path.join(dest, "plugin.py"), encoding="utf-8") as f:
             self.assertIn("2.0.0", f.read())
         _unmap(lib)
-        self.manager.discover()  # 下次启动清扫
+        self.manager.discover()
         self.assertEqual([n for n in os.listdir(self.modules_root)
                           if n.startswith("sample")], ["sample"])
 
 
 class ModuleDeleteTests(unittest.TestCase):
-    """删除/清扫语义：被映像锁占用（扩展 .pyd 已载入进程）的模块目录。
-
-    Windows 实测：映射中的 .pyd 文件本身删不掉（WinError 5），所在目录却
-    可以重命名——删除失败时改名 <id>.pending_delete 摘出扫描，下次启动
-    discover 自动清扫（锁已释放）。
-    """
 
     def setUp(self):
         self.modules_root = tempfile.mkdtemp(prefix="dgstudio_del_")
@@ -602,22 +552,19 @@ class ModuleDeleteTests(unittest.TestCase):
         os.makedirs(dep_dir)
         ext = os.path.join(dep_dir, "cv2.pyd")
         lib = _mapped_pyd(ext)
-        with self.assertRaises(OSError):  # 映像保留到进程退出，删除被拒
+        with self.assertRaises(OSError):
             os.remove(ext)
-        self.manager.delete_module("locked")  # 目录改名让位，不抛错
+        self.manager.delete_module("locked")
         self.assertFalse(os.path.exists(module_dir))
         pending = module_dir + ".pending_delete"
         self.assertTrue(os.path.isfile(
             os.path.join(pending, "_deps", "cv2", "cv2.pyd")))
         self.assertNotIn("locked", self.manager._paths)
-        _unmap(lib)  # 应用退出 = 锁释放
-        self.manager.discover()  # 下次启动清扫
+        _unmap(lib)
+        self.manager.discover()
         self.assertFalse(os.path.exists(module_dir + ".pending_delete"))
 
     def test_delete_plain_open_handle_marks_cleanup(self):
-        # 普通打开句柄（无 FILE_SHARE_DELETE，杀软扫描/数据映射类）删不掉
-        # 且不可改名：短重试后放弃删除、不抛错；模块目录被打自动清理标记，
-        # 锁释放后的下次 discover 整目录清扫
         module_dir = self._make_module("held")
         extra = os.path.join(module_dir, "_deps", "x")
         os.makedirs(extra)
@@ -627,20 +574,19 @@ class ModuleDeleteTests(unittest.TestCase):
         fh = open(data, "rb")
         try:
             with unittest.mock.patch("plugins.time.sleep"):
-                self.manager.delete_module("held")  # 不抛错
+                self.manager.delete_module("held")
         finally:
             fh.close()
-        self.assertTrue(os.path.isdir(module_dir))  # 占用中删不净，残留
+        self.assertTrue(os.path.isdir(module_dir))
         self.assertTrue(os.path.isfile(
             os.path.join(module_dir, "_deps", "x", "blob.bin")))
         self.assertTrue(os.path.isfile(
             os.path.join(module_dir, _CLEANUP_MARKER)))
-        self.assertNotIn("held", self.manager._paths)  # 已从模块列表摘除
-        self.manager.discover()  # 锁释放，清扫
+        self.assertNotIn("held", self.manager._paths)
+        self.manager.discover()
         self.assertFalse(os.path.exists(module_dir))
 
     def test_delete_transient_handle_retries_then_succeeds(self):
-        # 瞬时占用（杀软扫描类）：重试窗口内释放后删除成功，无残留
         module_dir = self._make_module("transient")
         extra = os.path.join(module_dir, "_deps", "x")
         os.makedirs(extra)
@@ -672,11 +618,6 @@ class ModuleDeleteTests(unittest.TestCase):
 
 
 class BundledWheelsTests(unittest.TestCase):
-    """模块自带 wheels 安装时合并：解包进 _deps 即完成安装（不联网不跑 pip）。
-
-    wheel 即 zip（包内容 + dist-info），合并后 requirement_satisfied 的
-    _deps 元数据探测直接复用；pip 仅兜底 wheels 未覆盖的剩余依赖。
-    """
 
     def setUp(self):
         self.modules_root = tempfile.mkdtemp(prefix="dgstudio_whl_")
@@ -722,7 +663,7 @@ class BundledWheelsTests(unittest.TestCase):
             os.path.join(wheels, "dgstudio_fake_dep-1.0-py3-none-any.whl"),
             "dgstudio-fake-dep", "1.0")
 
-        def _fail_run(*_args, **_kwargs):  # 合并路径不应触发 pip
+        def _fail_run(*_args, **_kwargs):
             raise AssertionError("pip 不应被调用")
 
         with unittest.mock.patch.object(sys, "frozen", True, create=True), \
@@ -756,7 +697,7 @@ class BundledWheelsTests(unittest.TestCase):
             f.write("# sentinel\n")
         with frozen, _frozen_exe(base):
             ok, _still, _out = self.manager.store.ensure_dependencies("sample")
-        self.assertTrue(ok)  # dist-info 在位 → 跳过重合并
+        self.assertTrue(ok)
         with open(init_py, encoding="utf-8") as f:
             self.assertEqual(f.read(), "# sentinel\n")
 

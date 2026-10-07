@@ -14,8 +14,6 @@ from win32more.Microsoft.UI.Xaml.Controls import (
 from ui import widgets as W
 
 
-# ------------------------------------------------------------------ 文件选择器
-
 class _OPENFILENAMEW(ctypes.Structure):
     _fields_ = [
         ("lStructSize", wintypes.DWORD),
@@ -77,13 +75,11 @@ def _run_file_dialog(save: bool, title: str, *, wildcard: str = _JSON_FILTER,
 
 
 def pick_open_path(title: str = "选择文件", **kwargs) -> str | None:
-    """原生打开对话框：返回选中路径，取消返回 None。"""
     return _run_file_dialog(False, title, **kwargs)
 
 
 def pick_save_path(title: str = "另存为", *, default_name: str = "config.json",
                    **kwargs) -> str | None:
-    """原生保存对话框：返回目标路径，取消返回 None。"""
     return _run_file_dialog(True, title, default_name=default_name, **kwargs)
 
 
@@ -102,8 +98,6 @@ def _make_dialog(shell, *, title: str, content, primary: str | None,
 
 
 def _dismiss_open_popups(shell) -> None:
-    """ContentDialog 的变暗遮罩盖不住 XAML Popup 层——打开中的下拉 / 联想
-    浮层会浮在遮罩上方。弹窗前先收起全部打开的浮层。"""
     try:
         root = shell.RootGrid
         xaml_root = root.XamlRoot
@@ -138,7 +132,6 @@ def _close_dropdowns_in_tree(element) -> None:
 
 async def confirm_dialog(shell, title: str, message: str, *,
                          primary: str = "确定", close: str = "取消") -> bool:
-    """消息确认框：返回是否点了主按钮。"""
     panel = W.stack(spacing=12)
     panel.Children.Append(W.text(message, size=13, wrap=True))
     dialog = _make_dialog(shell, title=title, content=panel,
@@ -149,7 +142,6 @@ async def confirm_dialog(shell, title: str, message: str, *,
 
 async def prompt_text(shell, title: str, message: str, *, initial: str = "",
                       primary: str = "确定", close: str = "取消") -> str | None:
-    """单行文本输入框：确认返回输入文本，取消返回 None。"""
     box = W.text_box(text=initial, width=280)
     panel = W.stack(spacing=12)
     panel.Children.Append(W.text(message, size=13, wrap=True))

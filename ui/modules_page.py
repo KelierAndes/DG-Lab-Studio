@@ -23,12 +23,6 @@ _DOCS_URL = "https://github.com/KelierAndes/dgstudio-modules-market/blob/main/EX
 
 
 def online_section_state(store) -> tuple[str, list]:
-    """在线模块区状态（以 store 为唯一数据源，避免页面副本失步）：
-
-    * ``ready`` —— store.entries 有清单，渲染模块卡片；
-    * ``empty`` —— 已成功获取但清单为空；
-    * ``idle`` —— 尚未获取 / 获取失败（配合 store.last_error 提示）。
-    """
     if store.entries:
         return "ready", store.entries
     if store.fetched_at:
@@ -83,7 +77,6 @@ class ModulesPage(XamlClass, Page):
             self._fetch_started = True
             self._fetch_online(force=False)
 
-    # -------------------------------------------------------------- 本地模块
 
     def _rescan(self) -> None:
         found = self.shell.engine.modules.discover()
@@ -170,7 +163,6 @@ class ModulesPage(XamlClass, Page):
             buttons.Children.Append(W.text_button("卸载", symbol="Remove",
                                                   on_click=lambda s, e, mid=module_id: self._uninstall(mid)))
         if meta["config"] and meta["enabled"]:
-            # 已安装且声明配置项的模块在联动页有对应卡片，提供跳转入口
             buttons.Children.Append(nav.link("联动设置", "link"))
 
         actions = W.stack(horizontal=True, spacing=8, v="center", h="right")
@@ -196,7 +188,6 @@ class ModulesPage(XamlClass, Page):
         return W.card(inner)
 
     def _deps_row(self, meta: dict) -> object | None:
-        """依赖声明行：逐项 ✓/缺 状态；缺必装依赖时给出「安装依赖」按钮。"""
         requirements = [str(r) for r in (meta.get("dependencies") or [])
                         if str(r).strip()]
         if not requirements:
@@ -250,7 +241,6 @@ class ModulesPage(XamlClass, Page):
             inner.Children.Append(hyperlink)
         return W.card(inner)
 
-    # -------------------------------------------------------------- 在线模块
 
     def _online_list(self) -> object:
         manager = self.shell.engine.modules
@@ -371,7 +361,6 @@ class ModulesPage(XamlClass, Page):
             threading.Thread(target=worker, daemon=True).start()
 
         if update and (manager.meta(module_id) or {}).get("loaded"):
-            # 运行中的模块先卸载再替换文件
             self._busy.add(module_id)
             self.rebuild()
 
@@ -392,7 +381,6 @@ class ModulesPage(XamlClass, Page):
         self.rebuild()
         do_download()
 
-    # -------------------------------------------------------- 依赖安装/删除
 
     def _install_deps(self, module_id: str) -> None:
         manager = self.shell.engine.modules
@@ -437,12 +425,10 @@ class ModulesPage(XamlClass, Page):
                     return
                 self.shell.ui_queue.put(self.rebuild)
 
-            # 删除含短重试（等待杀软等瞬时占用释放），后台执行避免卡界面
             threading.Thread(target=worker, daemon=True).start()
 
         asyncui.create_task(_confirm_delete())
 
-    # -------------------------------------------------------- 模块装卸操作
 
     def _run_module_action(self, coro, done_msg: str) -> None:
         engine = self.shell.engine
@@ -478,10 +464,8 @@ class ModulesPage(XamlClass, Page):
             self.shell.engine.modules.stop(module_id),
             f"模块已停止: {module_id}")
 
-    # -------------------------------------------------- 一键安装游戏模组
 
     def _game_mod_row(self, module_id: str) -> object:
-        """游戏模组安装行：路径输入框 + 自动扫描 + 一键安装。"""
         engine = self.shell.engine
         cfg = engine.modules.settings_for(module_id)
         box = W.text_box(text=str(cfg.get("mods_root") or ""),
@@ -523,8 +507,6 @@ class ModulesPage(XamlClass, Page):
 
     def _install_game_mod(self, module_id: str,
                           root: str | None = None) -> None:
-        """模块携带的 mods/ 释放到游戏目录：路径框已填 / 记住的路径直接装，
-        否则后台扫描，再不行转手动指定。全部文件操作在后台线程执行。"""
         self.shell.logs.append("正在定位游戏目录…")
 
         def worker() -> None:
@@ -562,7 +544,6 @@ class ModulesPage(XamlClass, Page):
         marker = str((meta.get("mods") or {}).get("marker") or "")
         remembered = str(cfg.get("mods_root") or "").strip()
         if remembered and os.path.isdir(remembered):
-            # 游戏根目录即可（BepInEx 缺失时安装流程会自动装）
             if (os.path.isdir(os.path.join(remembered, "BepInEx"))
                     or (marker and os.path.isfile(
                         os.path.join(remembered, marker)))

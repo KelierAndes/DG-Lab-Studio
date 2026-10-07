@@ -142,7 +142,6 @@ class Engine:
         self.events.on("ovc_button", self._on_ovc_button)
         self.events.on("ovc_button_up", self._on_ovc_button_up)
         self._fire_holds: dict[tuple[str, str], dict] = {}
-        # 脉冲流相位簿记：(slot, channel) → 上次推帧时刻（负鼠方波图案跨帧连续）
         self._pulse_phase: dict[tuple[str, str], float] = {}
         self._migrate_ovc_profiles()
 
@@ -159,10 +158,6 @@ class Engine:
 
     def _run_loop(self) -> None:
         if sys.platform == "win32":
-            # 引擎线程固定为 MTA 套间（COINIT_MULTITHREADED）：音频模块的
-            # PortAudio WASAPI 初始化会用 CoInitialize(NULL) 把线程改成 STA，
-            # bleak 在无消息泵的 STA 线程上蓝牙扫描/连接会直接报错。
-            # 返回 RPC_E_CHANGED_MODE 说明已是其他套间，此时不动。
             ctypes.windll.ole32.CoInitializeEx(None, 0x0)
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
@@ -449,19 +444,11 @@ class Engine:
     }
 
     def intensity_params(self, slot_id: str | None = None) -> dict:
-        """强度参数公开快照（模块/界面统一读取入口）。
-
-        返回 slot_id 对应设备（缺省解析为默认输出设备）的当前强度、上限、
-        探活状态、最大强度/步长/开火强度等全部强度相关参数。
-        开火强度按通道拆分：``fire_strength_a`` / ``fire_strength_b``（0 =
-        跟随本设备上限），``fire_strength`` 为旧版双通道共用的遗留键（兼容保留）。
-        """
         state = self.get_state()
         sid = self.resolve_slot(slot_id)
         slot = state.slots.get(sid) if sid else None
 
         def _fire_raw(channel: str) -> int:
-            """通道开火强度原始设定（0 = 跟随上限；取值链见 _fire_setting）。"""
             return self._fire_setting(sid, channel)
 
         return {
@@ -483,13 +470,6 @@ class Engine:
         }
 
     def _fire_setting(self, slot_id: str | None, channel: str) -> int:
-        """通道开火强度的「最具体非零」设定；全链无设定返回 0（跟随上限）。
-
-        取值链：设备级 ``fire_strength_<通道>`` → 全局 ``fire_strength_<通道>``
-        → 设备级 ``fire_strength``（旧版双通道键）→ 全局 ``fire_strength``。
-        设备级键**存在即为用户意图**（显式 0 = 跟随上限，该层终结）；
-        全局 0 视为未设定，继续向旧键回退（升级兼容）。
-        """
         low = str(channel or "A").lower()
         per_dev = self.config.get("device_settings", {}).get(slot_id or "") or {}
         for key in (f"fire_strength_{low}", "fire_strength"):
@@ -508,10 +488,6 @@ class Engine:
         return 0
 
     def fire_strength(self, slot_id: str | None, channel: str) -> int:
-        """某通道开火强度的实际生效值（显式 0 / 全链未设定 = 跟随最大强度上限）。
-
-        在 ``_fire_setting`` 结果上做跟随上限替换，再按该通道实际上报
-        上限与设备量程取整钳制。"""
         cap = self._fire_setting(slot_id, channel)
         if cap <= 0:
             cap = int(self.device_setting(slot_id, "max_strength") or 100)
@@ -525,15 +501,9 @@ class Engine:
         return max(1, cap)
 
     def _fire_value(self, slot, sid: str | None = None, channel: str = "A") -> int:
-        """开火强度取值（``fire_strength`` 的内部入口，slot 已由调用方解析）。"""
         return self.fire_strength(sid, channel)
 
     def set_intensity_param(self, key: str, value, slot_id: str | None = None) -> None:
-        """强度参数公开写入口（max_strength/strength_step/fire_strength/
-        fire_strength_a/fire_strength_b/fire_duration_s/wave_duration_s）。
-
-        slot_id 给出时写入该设备的独立覆盖（device_settings），否则写全局配置。
-        """
         if key == "wave_duration_s":
             try:
                 value = max(1.0, min(120.0, float(value)))
@@ -558,7 +528,6 @@ class Engine:
                   + (f" (设备 {slot_id})" if slot_id else " (全局)"))
 
     def wave_selection(self) -> dict:
-        """当前选定的波形名（A/B 通道）。"""
         return {ch: str(self._selected_wave.get(ch) or SILENT) for ch in ("A", "B")}
 
     async def set_strength(self, channel: str, value: int, slot_id: str | None = None) -> None:
@@ -608,16 +577,6 @@ class Engine:
 
     async def push_pulse_stream(self, frequency: int, channel: str = "A",
                                 level: int = 100, slot_id: str | None = None) -> None:
-        """外部脉冲流：接收联动模块推入的频率数据（每 0.1s 一次）生成波形。
-
-        模块以 0.1s 节奏调用（每帧 100ms），核心把「逻辑频率 (10-1000) +
-        电平 (0-100)」转成一帧脉冲，作为**最新帧**刷新设备播放——替代内置
-        波形发生器（追加历史会让循环播放指针越落越后，频率严重滞后）。
-        按设备家族构建：郊狼由设备按频率字节生成载波（电平=包络）；负鼠
-        振动无载波，频率合成进振幅方波图案（:func:`pulse_frame_vibration`，
-        相位跨帧连续）。仅当该通道波形选中「外部脉冲流」时落地，其余情况
-        静默丢弃（模块可常推不息）；未连接设备同样忽略。V3 为尽力而为。
-        """
         backend = self._backend
         if backend is None:
             return
@@ -660,7 +619,6 @@ class Engine:
                 await self.set_wave(ch, SILENT, slot_id=sid)
 
     async def zap(self, channel: str, seconds: float = 1.0, slot_id: str | None = None) -> None:
-        """瞬时脉冲：仅对指定通道开火（通道分离后 zap 不再波及另一通道）。"""
         await self.fire(slot_id=slot_id, duration_s=seconds, channel=channel)
 
     async def emergency_stop(self) -> None:
@@ -694,15 +652,10 @@ class Engine:
 
     @staticmethod
     def _fire_channels(channel: str | None) -> tuple[str, ...]:
-        """开火通道集合：显式 A/B 只动该通道，其余（None/旧调用）双通道。"""
         return (channel,) if channel in ("A", "B") else ("A", "B")
 
     async def fire(self, slot_id: str | None = None, duration_s: float | None = None,
                    channel: str | None = None) -> None:
-        """一键开火：指定通道（``channel``="A"/"B"）或全部通道（缺省）。
-
-        通道处于静默时临时切持续波形，结束后切回原本选定的波形。
-        """
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
         if sid is None:
@@ -734,12 +687,6 @@ class Engine:
 
     async def fire_start(self, slot_id: str | None = None,
                          channel: str | None = None) -> None:
-        """按住持续开火：按通道独立保持（``channel`` 缺省 = 双通道）。
-
-        保持记录以 (设备, 通道) 为键；已处于开火保持的通道不会重复触发。
-        V4 以增量抬升强度，结束（或超时）时按设备回报恢复；其余后端直接
-        设为开火强度，结束时恢复原强度。
-        """
         backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
         if sid is None:
@@ -900,7 +847,6 @@ class Engine:
         return None
 
     def _migrate_ovc_profiles(self) -> None:
-        """旧版单一 ovc_buttons 映射迁移为配置文件组 (ovc_profiles + ovc_profile)."""
         ble = self.config.setdefault("ble", {})
         profiles = ble.get("ovc_profiles")
         if not isinstance(profiles, dict) or not profiles:
@@ -909,20 +855,13 @@ class Engine:
             ble["ovc_profile"] = next(iter(ble["ovc_profiles"]), "默认")
 
     def ovc_bindings(self) -> dict[str, str]:
-        """当前激活配置文件的按键映射 (旧 ovc_buttons 作为兜底)."""
         ble = self.config.get("ble", {})
         profiles = ble.get("ovc_profiles") or {}
         active = ble.get("ovc_profile") or next(iter(profiles), "默认")
         return profiles.get(active) or ble.get("ovc_buttons") or {}
 
-    # ---- 负鼠按键映射配置文件：校验 / 重置 / 改名 ----
 
     def binding_missing_modules(self, bindings: dict | None = None) -> dict[str, str]:
-        """返回引用了未加载模块动作的按键绑定 (bit → binding)。
-
-        内置动作与键盘注入 (key:) 视为始终可用；模块动作只有在对应模块
-        加载后才可用，卸载模块后相关绑定由界面提示启用模块或拒绝加载。
-        """
         if bindings is None:
             bindings = self.ovc_bindings()
         missing: dict[str, str] = {}
@@ -939,13 +878,11 @@ class Engine:
         return missing
 
     def modules_for_bindings(self, bindings: dict) -> list[str]:
-        """绑定集合引用到的（可启用的）模块 id 列表。"""
         module_ids = {self.modules.module_for_action(str(b).partition(":")[0])
                       for b in bindings.values()}
         return sorted(mid for mid in module_ids if mid)
 
     def reset_bindings(self, bits, profile: str | None = None) -> None:
-        """把指定按键位的绑定重置为 none（拒绝加载引用未启用模块的映射时）。"""
         ble = self.config.setdefault("ble", {})
         profiles = ble.setdefault("ovc_profiles", {})
         active = profile or ble.get("ovc_profile") or next(iter(profiles), "默认")
@@ -957,7 +894,6 @@ class Engine:
                   f"(引用未启用的模块)")
 
     def rename_ovc_profile(self, old: str, new: str) -> str | None:
-        """重命名按键映射配置文件；成功返回 None，失败返回错误说明。"""
         new = (new or "").strip()
         ble = self.config.setdefault("ble", {})
         profiles = ble.setdefault("ovc_profiles", {})
@@ -983,16 +919,10 @@ class Engine:
         self._check_missing_bindings()
 
     def _on_module_change(self, module_id: str) -> None:
-        """模块装卸钩子：卸载会新增「映射引用未启用模块」，立即重新校验。
-
-        安装只会消除缺失、不会产生新的缺失，故只在实例被移除时触发；
-        启动阶段（autostart 进行中）不校验，等启动完成统一检查一次。
-        """
         if self._modules_ready and self.modules.instance(module_id) is None:
             self._check_missing_bindings()
 
     def _check_missing_bindings(self) -> None:
-        """启动时校验当前映射：引用未启用模块的动作则发事件交由界面处理。"""
         missing = self.binding_missing_modules()
         if not missing:
             return
@@ -1131,7 +1061,6 @@ class Engine:
 
     @property
     def osc(self):
-        """当前 OSC 桥接器实例（osc_bridge 模块未加载时为 None）。"""
         module = self.modules.instance("osc_bridge")
         return getattr(module, "bridge", None) if module is not None else None
 

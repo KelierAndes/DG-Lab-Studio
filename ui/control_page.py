@@ -61,7 +61,6 @@ class CardView:
         self.button_glows: dict[int, object] = {}
 
 class _Series:
-    """line_chart 的一条曲线（鸭子类型，匹配原型 PressureSeries）。"""
 
     def __init__(self, label: str, color: int, points: tuple):
         self.label = label
@@ -188,8 +187,6 @@ class ControlPage(XamlClass, Page):
         low = 10 if ovc else 0
         settings = engine.config.setdefault("device_settings", {}).setdefault(sid, {})
         if ovc:
-            # 旧版设备级 fire_strength（双通道共用）迁移为 A/B 两键的初始值；
-            # 设备级旧值优先于全局新键，避免升级后静默改动用户已设的开火强度
             legacy_fire = settings.get("fire_strength")
             if legacy_fire is None:
                 legacy_fire = engine.config.get(
@@ -243,7 +240,6 @@ class ControlPage(XamlClass, Page):
 
         chart_panel = W.panel(self._chart_inner(view), padding=12)
 
-        # 开火按通道独立：每通道一格（开火键 + 按住键），两列自适应宽度
         def _fire(ch: str):
             return lambda s, e: self.shell.submit(engine.fire(slot_id=sid, channel=ch))
 
@@ -456,10 +452,8 @@ class ControlPage(XamlClass, Page):
         cell.Children.Append(combo)
         return cell
 
-    # ---- 负鼠按键映射配置文件 ----
 
     def _active_bindings(self) -> dict:
-        """当前激活配置文件的按键映射 (bit → 动作)."""
         ble = self.shell.engine.config.setdefault("ble", {})
         profiles = ble.setdefault("ovc_profiles", {})
         active = ble.setdefault("ovc_profile", "默认")
@@ -489,7 +483,6 @@ class ControlPage(XamlClass, Page):
                 engine.save_config()
                 self.rebuild()
                 return
-            # 目标配置引用了未启用模块的动作：先还原选择，再弹窗询问
             module_ids = engine.modules_for_bindings(missing)
             self._updating = True
             try:
@@ -578,34 +571,27 @@ class ControlPage(XamlClass, Page):
         self.shell.logs.append(f"配置文件已重命名：{old} → {new}")
         self.rebuild()
 
-    # ---- 负鼠绑定块：官方离线模式页 1:1 复刻 ----
-    # 坐标一律取官方截图像素系（647×291），经 _BV_SCALE 缩放平移后画到画布上。
-    # 机身对称轴 x=316：十字键簇中心 246 与菱形键簇中心 386 互为镜像。
-    # _BV_OX 取 -30：给左侧 OSC 输入框留出画布空间（输入框与选择按钮错开摆放）。
     _BV_SCALE = 1.5
     _BV_OX, _BV_OY = -30, 78
 
     _BV_BG = "#0B0B0B"
-    _BV_EDGE = ("#8E8E8E", "#585858", "#414141")   # 机身三层描边（外→内）
-    _BV_ART = "#8F8F8F"                            # 屏幕/键外层描边
-    _BV_ART2 = "#6F6F6F"                           # 键内层描边（双层样式）
-    _BV_GLYPH = "#C6C6C6"                          # 键面符号/字母
-    _BV_LEAD = "#C9C9C9"                           # 指示线
-    _BV_DOT = "#F2F2F2"                            # 指示线端点（按键内偏侧）
-    _BV_TEXT = "#D9CFA6"                           # 标注文字（米黄）
+    _BV_EDGE = ("#8E8E8E", "#585858", "#414141")
+    _BV_ART = "#8F8F8F"
+    _BV_ART2 = "#6F6F6F"
+    _BV_GLYPH = "#C6C6C6"
+    _BV_LEAD = "#C9C9C9"
+    _BV_DOT = "#F2F2F2"
+    _BV_TEXT = "#D9CFA6"
 
-    _BV_BODY = (188, 92, 444, 227, 16)              # x0 y0 x1 y1 切角
+    _BV_BODY = (188, 92, 444, 227, 16)
     _BV_SCREEN = (284, 112, 348, 143)
-    # 十字键：中心 (246,165)，半长 38 使整体 76×76 与右侧键组（76×74）一致，
-    # 臂厚 20 与中心圆直径一致；外围折角圆角化。
-    _BV_CXKEY = (246, 165, 38, 10)                  # cx cy 半长 半宽
+    _BV_CXKEY = (246, 165, 38, 10)
     _BV_DIRS = {8: ((246, 132), (241, 140), (251, 140)),
                 9: ((246, 198), (241, 190), (251, 190)),
                 10: ((216, 165), (224, 160), (224, 170)),
                 11: ((276, 165), (268, 160), (268, 170))}
     _BV_FACES = {14: (386, 141, "G"), 15: (361, 165, "D"),
                  12: (411, 165, "B"), 13: (386, 189, "A")}
-    # 底部 SEL_1 / HOME / SEL_2：双层线稿，中心线 y=202 对齐键组最下缘
     _BV_SMALLS = {0: (((282, 202), (296, 194), (296, 210)),
                       ((285.5, 202), (294, 196.8), (294, 207.2))),
                   2: (((309, 194), (323, 194), (323, 210), (309, 210)),
@@ -613,9 +599,6 @@ class ControlPage(XamlClass, Page):
                        (311.3, 207.7))),
                   1: (((350, 202), (336, 194), (336, 210)),
                       ((346.5, 202), (338, 196.8), (338, 207.2)))}
-    # 指示线：终点圆点落在键面内、避开字符/箭头（左簇左移 8，右簇右移 8，
-    # 关于轴 316 镜像对称）。右簇行 2=D、行 3=B：D 线从 G 键下方穿过 G/B 环
-    # 间隙落到 D 面右上，B 线自行 3 斜上落到 B 面右侧。
     _BV_LINKS = {
         8: [(163, 104), (205, 104), (238, 137)],
         10: [(163, 141), (189, 141), (213, 165)],
@@ -629,8 +612,6 @@ class ControlPage(XamlClass, Page):
         2: [(316, 248), (316, 202)],
         1: [(394, 240), (357, 240), (341, 224), (341, 202)],
     }
-    # 四行标注 y=104/141/178/215，整体中心 159.5 = 机身高度中心（垂直居中）
-    # bit -> (文字锚点x, y, 宽(画布px), 对齐)；锚点=文字靠近引导线一侧的边缘
     _BV_LABELS = {
         8: (158, 104, 130, "right"), 10: (158, 141, 130, "right"),
         11: (158, 178, 130, "right"), 9: (158, 215, 130, "right"),
@@ -639,22 +620,17 @@ class ControlPage(XamlClass, Page):
         0: (234, 240, 130, "right"), 1: (398, 240, 130, "left"),
         2: (316, 262, 130, "center"),
     }
-    _BV_BTN_H = 30                                  # 标注按钮高度（画布px）
-    _BV_BOX_W = 130                                 # OSC 输入框宽（画布px）
-    # 按下实时反馈的高亮覆盖层：bit -> (中心x, 中心y, 半径)（官方像素系）。
-    # 十字键落在臂端箭头上，小键落在键面中心，菱形键覆盖整个双环。
+    _BV_BTN_H = 30
+    _BV_BOX_W = 130
     _BV_GLOW = {8: (246, 138, 9), 9: (246, 192, 9),
                 10: (220, 165, 9), 11: (272, 165, 9),
                 0: (291, 202, 9), 2: (316, 202, 9), 1: (341, 202, 9),
                 14: (386, 141, 12.5), 15: (361, 165, 12.5),
                 12: (411, 165, 12.5), 13: (386, 189, 12.5)}
-    _BV_GLOW_FILL = Color(110, 90, 190, 255)        # 半透明亮蓝填充
-    _BV_GLOW_STROKE = Color(235, 140, 210, 255)     # 近不透明描边
-    _BV_GLOW_MIN = 0.25                             # 快按最短点亮时长（秒）
-    _BV_GLOW_MAX = 8.0                              # 丢抬起沿时的兜底熄灭（秒）
-    # 画布固定在深色底上，块内原生控件不随系统主题变化：
-    # 用控件级 Resources 覆写 Button/TextBox 模板的主题资源键，
-    # 亮色模式下仍是深色芯片观感，米黄文字保持可读。
+    _BV_GLOW_FILL = Color(110, 90, 190, 255)
+    _BV_GLOW_STROKE = Color(235, 140, 210, 255)
+    _BV_GLOW_MIN = 0.25
+    _BV_GLOW_MAX = 8.0
     _BV_BTN_DARK = {
         "ButtonBackground": "#141414",
         "ButtonBackgroundPointerOver": "#1F1F1F",
@@ -707,7 +683,6 @@ class ControlPage(XamlClass, Page):
 
     def _bv_rpoly(self, canvas, pts, stroke, radius, *, width=1.2,
                   fill=None) -> None:
-        """闭合多边形折角圆角化：每个顶点沿两侧边各缩进 radius，配 Round 接头。"""
         n = len(pts)
         rounded = []
         for i in range(n):
@@ -753,12 +728,6 @@ class ControlPage(XamlClass, Page):
         ToolTipService.SetToolTip(element, tip)
 
     def flash_button(self, bit: int, pressed: bool) -> None:
-        """shell 收到 ovc_button/ovc_button_up 事件后在 UI 线程调用。
-
-        真机只在电平变化时发一次边沿事件：长按=按下后无事件，直到抬起。
-        因此按下即点亮（保持到抬起沿），抬起时保证最短点亮 _BV_GLOW_MIN，
-        _BV_GLOW_MAX 仅作为丢抬起沿（如断连）的兜底熄灭。
-        """
         found = False
         now = time.monotonic()
         for view in self._cards.values():
@@ -815,7 +784,6 @@ class ControlPage(XamlClass, Page):
             return [(a + k, b), (c - k, b), (c, b + k), (c, d - k),
                     (c - k, d), (a + k, d), (a, d - k), (a, b + k)]
 
-        # 机身：三层切角描边（上下轮廓一致，无齿状凸起）
         self._bv_poly(canvas, octagon(x0, y0, x1, y1, ch), edges[0],
                       width=1.4, fill=bg, close=True)
         self._bv_poly(canvas, octagon(x0 + 5, y0 + 5, x1 - 5, y1 - 5, ch - 3),
@@ -823,12 +791,10 @@ class ControlPage(XamlClass, Page):
         self._bv_poly(canvas, octagon(x0 + 10, y0 + 10, x1 - 10, y1 - 10,
                                       ch - 5), edges[2], width=1.0, close=True)
 
-        # 屏显窗（中心 x=316，与机身同轴）
         sx0, sy0, sx1, sy1 = self._BV_SCREEN
         self._bv_poly(canvas, [(sx0, sy0), (sx1, sy0), (sx1, sy1),
                                (sx0, sy1)], art, fill=bg, close=True)
 
-        # 十字方向键：收窄的双层圆角十字 + 双层中心圆 + 四向箭头（远离中心）
         ccx, ccy, half, arm = self._BV_CXKEY
 
         def cross(hf, af):
@@ -848,17 +814,14 @@ class ControlPage(XamlClass, Page):
         for pts in self._BV_DIRS.values():
             self._bv_poly(canvas, pts, glyph, width=1.1, fill=bg, close=True)
 
-        # G/D/B/A 双环菱形键（簇中心 386，与十字键簇 246 关于轴 316 对称）
         for fx, fy, _letter in self._BV_FACES.values():
             self._bv_ring(canvas, fx, fy, 13, art, fill=bg)
             self._bv_ring(canvas, fx, fy, 9.5, art2)
 
-        # 底部 SEL_1 / HOME / SEL_2 小键（◁ ▢ ▷ 双层线稿、圆角连接）
         for outer, inner in self._BV_SMALLS.values():
             self._bv_poly(canvas, outer, art, width=1.2, fill=bg, close=True)
             self._bv_poly(canvas, inner, art2, width=0.9, close=True)
 
-        # 指示线（45° 斜段 + 平行横段），终点圆点落在按键正中心
         for pts in self._BV_LINKS.values():
             self._bv_poly(canvas, pts, lead, width=1.0)
             ex, ey = pts[-1]
@@ -870,7 +833,6 @@ class ControlPage(XamlClass, Page):
             e.Fill = dot
             canvas.Children.Append(e)
 
-        # 键面字母最后画，压在圆点之上
         for fx, fy, letter in self._BV_FACES.values():
             t = W.text(letter, size=16, bold=W.SEMIBOLD, align="center")
             t.Foreground = glyph
@@ -879,7 +841,6 @@ class ControlPage(XamlClass, Page):
             Canvas.SetLeft(t, Canvas.GetLeft(t) - 14)
             Canvas.SetTop(t, Canvas.GetTop(t) - 12)
 
-        # 按下反馈高亮层：默认隐藏，收到 ovc_button 事件时点亮
         glow_fill = SolidColorBrush(self._BV_GLOW_FILL)
         glow_stroke = SolidColorBrush(self._BV_GLOW_STROKE)
         for bit, (gx, gy, gr) in self._BV_GLOW.items():
@@ -897,8 +858,6 @@ class ControlPage(XamlClass, Page):
             view.button_glows[bit] = e
             canvas.Children.Append(e)
 
-        # 标注：原生默认样式按钮（点击文字弹出选择框改绑）；
-        # OSC 时输入框与按钮错开摆放（左列在左、右列在右、中间在下方）
         for bit, (ax, ly, width, align) in self._BV_LABELS.items():
             px, py = self._bv_pt(ax, ly)
             btn = self._binding_label(view, bit, bindings, width=width,
@@ -938,10 +897,6 @@ class ControlPage(XamlClass, Page):
             item.Click += self._make_binding_click(view, bit, key)
             flyout.Items.Append(item)
 
-        # 保留原生默认 Button 模板（点击弹出系统选择框观感），仅通过
-        # 控件级资源键固定深色系配色，使亮色主题下画布内控件不翻浅。
-        # OSC 绑定时按钮保持可见（仍可点开选择框改回其他动作），
-        # 输入框错开摆放：左列在按钮左侧、右列在右侧、中间在下方。
         bw = width + 12
         if align == "right":
             bx = x - bw
@@ -1001,7 +956,6 @@ class ControlPage(XamlClass, Page):
 
     def _binding_key_capture(self, view: CardView, bit: int, name: str,
                              width: float) -> object:
-        """键盘绑定捕获框: 点击聚焦后按下任意键完成绑定."""
         box = W.text_box(text=name, width=width)
         box.FontSize = 10
         box.Height = 28
@@ -1245,8 +1199,6 @@ class ControlPage(XamlClass, Page):
                 continue
             monitor = engine.wave_history(sid)
             samples = monitor.window(5.0) if monitor is not None else []
-            # 签名检测:波形数据没变化就跳过 PNG 渲染与图像写入
-            # (此前每 0.25s 无条件软渲染+跨 COM 流式写图,静默波形也在烧)
             sig = (dark, hash(tuple(samples)))
             if sig == view.wave_sig:
                 continue

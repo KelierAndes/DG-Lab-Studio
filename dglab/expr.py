@@ -1,17 +1,3 @@
-"""安全四则运算表达式求值：变量用 {名称} 引用（花括号内也可写子表达式）。
-
-设计给联动映射的「运算组合」使用，例如::
-
-    {HP} / {HPmax} * 200
-    ({StrengthA} - {LimitA}) * ({Hurt} / 100 + 1)
-
-约定：
-* 仅允许 + - * / // % ** 比较运算（> >= < <= == !=）括号与数字、标识符、
-  abs/min/max/round 函数；比较结果真 = 1 / 假 = 0；
-* 未定义变量按 0 处理（OSC/游戏数据到达前不报错）；
-* 除零 / 语法错误抛 ExprError，调用方跳过本轮即可；
-* 全角括号与运算符自动归一化，方便中文输入法下书写。
-"""
 
 from __future__ import annotations
 
@@ -20,8 +6,8 @@ import re
 
 __all__ = ["ExprError", "evaluate", "eval_int", "variables", "normalize"]
 
-_MAX_POW = 16          # 指数上限，防 9**9**9 卡死
-_MAX_BASE = 1e12       # 底数上限
+_MAX_POW = 16
+_MAX_BASE = 1e12
 
 _FULLWIDTH = str.maketrans(
     "（）｛｝＋－／＊％．，０１２３４５６７８９",
@@ -32,7 +18,7 @@ _FUNCS = {"abs": abs, "min": min, "max": max, "round": round}
 
 
 class ExprError(ValueError):
-    """表达式非法或求值失败（除零、语法错误、越界等）。"""
+    pass
 
 
 def normalize(text: str) -> str:
@@ -40,7 +26,6 @@ def normalize(text: str) -> str:
 
 
 def variables(text: str) -> set[str]:
-    """表达式引用的全部变量名（供 UI 校验/提示；不含函数名与数字）。"""
     names: set[str] = set()
     for token in _IDENT.findall(normalize(text)):
         if token not in _FUNCS:
@@ -49,11 +34,9 @@ def variables(text: str) -> set[str]:
 
 
 def evaluate(text: str, values: dict[str, float]) -> float:
-    """求值。先递归展开 {…}（内层结果以数字回填），再解析顶层表达式。"""
     src = normalize(text)
     if not src:
         raise ExprError("空表达式")
-    # 内层花括号优先：{…} 内不允许再嵌套（正则取最内层非嵌套段）
     while True:
         m = re.search(r"\{([^{}]*)\}", src)
         if m is None:
@@ -67,7 +50,6 @@ def evaluate(text: str, values: dict[str, float]) -> float:
 
 def eval_int(text: str, values: dict[str, float],
              low: int, high: int) -> int:
-    """求值 → 四舍五入取整 → 钳制到 [low, high]。"""
     return clamp_int(evaluate(text, values), low, high)
 
 
@@ -83,11 +65,9 @@ def _eval_python(src: str, values: dict[str, float]) -> float:
     src = src.strip()
     if not src:
         raise ExprError("空的 {} 段")
-    # 变量名优先：核心参数 id 含点号（COYOTE.StrengthA），不是合法 Python 标识符
     if src in values:
         return float(values[src])
     if _DOTTED.fullmatch(src):
-        # 带点参数 id（设备未接入时不在值表）按未定义变量归 0，不报语法错误
         return 0.0
     try:
         tree = ast.parse(src, mode="eval")
@@ -137,7 +117,6 @@ def _node(node: ast.AST, values: dict[str, float]) -> float:
             return left ** right
         raise ExprError("不支持的运算符")
     if isinstance(node, ast.Compare):
-        # 比较运算（事件分支条件用）：真 = 1.0 / 假 = 0.0，链式左结合
         left = _node(node.left, values)
         for op, comparator in zip(node.ops, node.comparators):
             right = _node(comparator, values)

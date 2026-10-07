@@ -595,13 +595,6 @@ class BleClient:
                      if waveform == PULSE_STREAM else ""))
 
     async def push_pulse_frame(self, slot_id: str, channel: str, frame: str) -> None:
-        """外部脉冲流：模块推入的帧 (100ms) 作为**最新帧**刷新播放。
-
-        推送节奏与设备消费同速（10 帧/秒），循环若按「追加历史」语义
-        积压，播放指针会越落越后（频率严重滞后）——故每推一帧即将播放
-        列表替换为该帧：设备下一拍起播最新频率，实时跟随；未推流期间
-        循环最后一帧（保持最后频率）。未知设备 / 灵猫静默忽略。
-        """
         session = self.sessions.get(slot_id)
         if session is None or session.kind == "bmtr":
             return
@@ -628,8 +621,6 @@ class BleClient:
 
     async def fire(self, slot_id: str | None = None, duration_s: float = 1.0,
                    value: int | dict | None = None, channels=None) -> None:
-        """临时抬升强度开火（按通道）：``channels`` 缺省双通道，``value`` 为
-        开火强度（int = 全部通道共用，dict = 按通道）；None 时用 200。"""
         session = self._session(slot_id)
         if session.kind == "bmtr":
             raise RuntimeError("灵猫是气压传感器，无输出通道")

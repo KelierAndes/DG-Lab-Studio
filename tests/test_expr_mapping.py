@@ -1,4 +1,3 @@
-"""表达式求值（dglab.expr）与共享映射引擎（dglab.mapping）回归测试。"""
 from __future__ import annotations
 
 import os
@@ -21,11 +20,10 @@ class ExprTests(unittest.TestCase):
         self.assertAlmostEqual(expr.evaluate("2**3+{HP}%7", vals), 10.0)
 
     def test_user_example(self):
-        # （输入，in_strength_a <- {Strength-max}*({HP}+{Hurt}/{HPmax}) 取整）
         vals = {"Strength": 120.0, "max": 200.0, "HP": 60.0,
                 "Hurt": 12.0, "HPmax": 100.0}
         out = expr.eval_int("{Strength-max}*({HP}+{Hurt}/{HPmax})", vals, 0, 200)
-        self.assertEqual(out, 0)   # 负值钳到 0
+        self.assertEqual(out, 0)
         vals["Strength"] = 300.0
         self.assertEqual(expr.eval_int("{Strength-max}*({HP}+{Hurt}/{HPmax})",
                                        vals, 0, 200), 200)
@@ -38,7 +36,6 @@ class ExprTests(unittest.TestCase):
         self.assertAlmostEqual(expr.evaluate("{nope}*5+2", {}), 2.0)
 
     def test_unknown_dotted_param_is_zero(self):
-        # 核心输出参数 id 带点号：设备未接入（不在值表）时按 0，不报语法节点错误
         self.assertAlmostEqual(expr.evaluate("{COYOTE.StrengthA}+1", {}), 1.0)
         self.assertAlmostEqual(expr.evaluate("{COYOTE.2.Battery}", {}), 0.0)
 
@@ -66,7 +63,7 @@ class ExprTests(unittest.TestCase):
     def test_variables(self):
         self.assertEqual(expr.variables("{HP}/{HPmax}*200+{a}"),
                          {"HP", "HPmax", "a"})
-        self.assertEqual(expr.variables("max(1,{x})"), {"x"})   # 函数名不算变量
+        self.assertEqual(expr.variables("max(1,{x})"), {"x"})
 
 
 class MappingEngineTests(unittest.TestCase):
@@ -80,19 +77,19 @@ class MappingEngineTests(unittest.TestCase):
 
     def test_signal_triggers_dispatch_on_change(self):
         self.engine.set_mappings({"in_strength_a": "{HP}/{HPmax}*200"})
-        self.sent = []                          # set_mappings 首轮 pump 不算
+        self.sent = []
         self.engine.signal("HP", 60)
-        self.engine.signal("HPmax", 100)      # 60/100*200=120
+        self.engine.signal("HPmax", 100)
         self.assertEqual(self.sent, [("in_strength_a", 120)])
-        self.engine.signal("HP", 60)          # 同值不重复派发
+        self.engine.signal("HP", 60)
         self.assertEqual(len(self.sent), 1)
-        self.engine.signal("HP", 30)          # 60
+        self.engine.signal("HP", 30)
         self.assertEqual(self.sent[-1], ("in_strength_a", 60))
 
     def test_device_vars_visible(self):
         self.engine.set_mappings({"in_strength_a": "{StrengthA}+{LimitA}"})
         self.engine.pump()
-        self.assertEqual(self.sent, [("in_strength_a", 200)])   # 250 钳到 200
+        self.assertEqual(self.sent, [("in_strength_a", 200)])
 
     def test_signal_overrides_device_var(self):
         self.engine.set_mappings({"in_strength_a": "{StrengthA}"})
@@ -113,15 +110,15 @@ class MappingEngineTests(unittest.TestCase):
     def test_bool_target_truthy_clamp(self):
         self.engine.set_mappings({"in_fire": "{flag}"})
         self.sent = []
-        self.engine.signal("flag", 0.4)      # (0,1] 正值归真（round(0.4)=0 会导致不生效）
+        self.engine.signal("flag", 0.4)
         self.assertEqual(self.sent, [("in_fire", 1)])
         self.engine.signal("flag", 0)
         self.assertEqual(self.sent[-1], ("in_fire", 0))
-        self.engine.signal("flag", 0.5)      # round(0.5)=0，同样必须归一为 1
+        self.engine.signal("flag", 0.5)
         self.assertEqual(self.sent[-1], ("in_fire", 1))
-        self.engine.signal("flag", -0.5)     # 负值 ≤0 归 0，不再按“非零即真”当成真
+        self.engine.signal("flag", -0.5)
         self.assertEqual(self.sent[-1], ("in_fire", 0))
-        self.engine.signal("flag", 2.5)      # 大于 1 钳制为 1
+        self.engine.signal("flag", 2.5)
         self.assertEqual(self.sent[-1], ("in_fire", 1))
 
     def test_reset(self):
@@ -131,7 +128,7 @@ class MappingEngineTests(unittest.TestCase):
         self.assertEqual(self.sent, [("in_fire", 1)])
         self.engine.reset()
         self.assertEqual(self.engine.signals, {})
-        self.engine.signal("b", 1)            # 重置后重新派发
+        self.engine.signal("b", 1)
         self.assertEqual(self.sent[-1], ("in_fire", 1))
 
     def test_as_number(self):
@@ -144,25 +141,24 @@ class MappingEngineTests(unittest.TestCase):
         from dglab.mapping import bool_value
         self.assertEqual(bool_value(0.4), 1)
         self.assertEqual(bool_value(1.0), 1)
-        self.assertEqual(bool_value(2.5), 1)     # 大于 1 钳制为 1
+        self.assertEqual(bool_value(2.5), 1)
         self.assertEqual(bool_value(0.0), 0)
-        self.assertEqual(bool_value(-0.5), 0)    # 小于等于 0 归 0
+        self.assertEqual(bool_value(-0.5), 0)
         self.assertEqual(bool_value(-7), 0)
-        self.assertEqual(bool_value(1e-12), 0)   # 浮点噪声按 0
+        self.assertEqual(bool_value(1e-12), 0)
 
     def test_typed_bool_output(self):
         from dglab.mapping import _typed
         self.assertTrue(_typed(0.4, "Bool"))
-        self.assertTrue(_typed(3.7, "Bool"))     # 大于 1 钳制为 true
+        self.assertTrue(_typed(3.7, "Bool"))
         self.assertFalse(_typed(0.0, "Bool"))
-        self.assertFalse(_typed(-0.5, "Bool"))   # 负值归 false（原 bool() 会给 True）
+        self.assertFalse(_typed(-0.5, "Bool"))
         self.assertFalse(_typed(-2, "Bool"))
         self.assertEqual(_typed(1.6, "Int"), 2)
         self.assertEqual(_typed(1.23456, "Float"), 1.235)
 
 
 class ChannelLimitClampTests(unittest.TestCase):
-    """强度映射结果按当前通道上限信号（LimitA/LimitB）动态钳制。"""
 
     def test_input_limit_signal_mapping(self):
         from dglab.params import input_limit_signal
@@ -188,17 +184,16 @@ class ChannelLimitClampTests(unittest.TestCase):
         engine, sent = self._engine(vars)
         engine.set_mappings({"in_strength_a": "{v}*2"})
         sent.clear()
-        engine.signal("v", 50)               # 100 → 收紧到通道上限 60
+        engine.signal("v", 50)
         self.assertEqual(sent, [("in_strength_a", 60)])
-        vars["COYOTE.LimitA"] = 200.0        # 上限放开 → 重算派发 100
+        vars["COYOTE.LimitA"] = 200.0
         engine.pump()
         self.assertEqual(sent[-1], ("in_strength_a", 100))
-        vars["COYOTE.LimitA"] = 30.0         # 上限收紧 → 重算派发 30
+        vars["COYOTE.LimitA"] = 30.0
         engine.pump()
         self.assertEqual(sent[-1], ("in_strength_a", 30))
 
     def test_channel_limit_bare_alias_fallback(self):
-        # 家族键缺失（跨家族兜底派发到别名指向的设备）时退回裸别名上限
         engine, sent = self._engine({"LimitA": 45.0})
         engine.set_mappings({"in_ovc_strength_a": "{v}"})
         sent.clear()
@@ -206,7 +201,6 @@ class ChannelLimitClampTests(unittest.TestCase):
         self.assertEqual(sent, [("in_ovc_strength_a", 45)])
 
     def test_channel_limit_absent_keeps_static_range(self):
-        # 上限信号未上报（设备未接入）时沿用静态 0-200 钳制
         engine, sent = self._engine({})
         engine.set_mappings({"in_strength_a": "{v}"})
         sent.clear()
@@ -214,7 +208,6 @@ class ChannelLimitClampTests(unittest.TestCase):
         self.assertEqual(sent, [("in_strength_a", 150)])
 
     def test_channel_limit_zero_ignored(self):
-        # 上限 ≤0 视为未上报，不把映射钉死在 0
         engine, sent = self._engine({"COYOTE.LimitA": 0.0})
         engine.set_mappings({"in_strength_a": "{v}"})
         sent.clear()
@@ -222,7 +215,6 @@ class ChannelLimitClampTests(unittest.TestCase):
         self.assertEqual(sent, [("in_strength_a", 40)])
 
     def test_bool_targets_unaffected(self):
-        # 非强度参数（开火）不引入通道上限钳制
         engine, sent = self._engine({"COYOTE.LimitA": 0.0})
         engine.set_mappings({"in_fire": "{v}"})
         sent.clear()
@@ -231,7 +223,6 @@ class ChannelLimitClampTests(unittest.TestCase):
 
 
 class FireNamingTests(unittest.TestCase):
-    """通道开火的默认参数名：通道后缀区分 fire_a/b，家族级 fire 名称不变。"""
 
     CONFIG = {"prefix": "DGLab",
               "device_prefixes": {"COYOTE": "DGLab", "OVC": "DGLabOvc"}}
@@ -265,7 +256,6 @@ class FireNamingTests(unittest.TestCase):
 
 
 class DispatcherEdgeTests(unittest.TestCase):
-    """fire / zap / 急停派发器的 0↔非零边沿记忆：重复派发不再重复动作。"""
 
     class _Api:
         def __init__(self):
@@ -309,7 +299,6 @@ class DispatcherEdgeTests(unittest.TestCase):
                          [("fire", "start", None), ("fire", "stop", None)])
 
     def test_fire_channel_dispatch(self):
-        """通道分离：fire_a / fire_b 只派发对应通道，与双通道 fire 互不混淆。"""
         api, actions = self._actions()
         actions["in_fire_a"](1)
         actions["in_fire_a"](1)
@@ -324,7 +313,6 @@ class DispatcherEdgeTests(unittest.TestCase):
         ])
 
     def test_emergency_dedupe(self):
-        # 瞬时脉冲（zap）参数已从核心目录移除（用户判定无意义），仅剩急停
         api, actions = self._actions()
         actions["in_emergency"](1)
         actions["in_emergency"](1)
@@ -336,7 +324,6 @@ async def _noop_coro():
 
 
 class TempVarTests(unittest.TestCase):
-    """临时变量表：按序求值并入值空间，自引用构成累加器，信号优先级更高。"""
 
     def setUp(self):
         self.sent: list[tuple[str, int]] = []
@@ -349,20 +336,19 @@ class TempVarTests(unittest.TestCase):
     def test_temp_rows_filters_invalid(self):
         self.assertEqual(temp_rows([
             {"name": "a", "expr": "{x}+1"},
-            {"name": "", "expr": "1"},          # 无名丢弃
-            {"name": "b", "expr": ""},          # 无表达式丢弃
-            {"name": "a", "expr": "2"},         # 同名去重（取首个）
+            {"name": "", "expr": "1"},
+            {"name": "b", "expr": ""},
+            {"name": "a", "expr": "2"},
         ]), [{"name": "a", "expr": "{x}+1"}])
 
     def test_temp_visible_to_mapping_and_value_space(self):
         self.engine.set_temp_rows([{"name": "half", "expr": "{StrengthA}/2"}])
-        self.sent = []                       # set_mappings 首轮 pump 不算
+        self.sent = []
         self.engine.set_mappings({"in_strength_a": "{half}*2"})
         self.assertEqual(self.sent, [("in_strength_a", 50)])
         self.assertEqual(self.engine.values()["half"], 25.0)
 
     def test_temp_self_reference_accumulates(self):
-        # 装载即求值一轮；自引用取上一轮值，每次重算 +1
         self.engine.set_temp_rows([{"name": "count", "expr": "{count}+1"}])
         self.assertEqual(self.engine.temps["count"], 1.0)
         self.engine.pump()
@@ -372,7 +358,7 @@ class TempVarTests(unittest.TestCase):
     def test_signal_overrides_temp(self):
         self.engine.set_temp_rows([{"name": "x", "expr": "1"}])
         self.engine.pump()
-        self.engine.signal("x", 9)     # 信号优先：临时变量不覆盖
+        self.engine.signal("x", 9)
         self.assertEqual(self.engine.values()["x"], 9.0)
 
     def test_temp_error_recorded(self):
@@ -390,7 +376,6 @@ class TempVarTests(unittest.TestCase):
 
 
 class EventStreamTests(unittest.TestCase):
-    """事件流卡片：驱动事件（周期/变更/if）与动作直列（输入/输出）。"""
 
     def setUp(self):
         self.sent: list[tuple[str, int]] = []
@@ -407,8 +392,8 @@ class EventStreamTests(unittest.TestCase):
              "actions": [{"dir": "in", "param": "in_fire", "var": "x"},
                          {"dir": "bad", "param": "p", "var": "v"},
                          {"dir": "in", "param": "", "var": "v"}]},
-            {"trigger": "change", "arg": "x"},           # 无名 → 默认名
-            {"trigger": "nope", "arg": 1},               # 未知触发丢弃
+            {"trigger": "change", "arg": "x"},
+            {"trigger": "nope", "arg": 1},
         ])
         self.assertEqual([c["name"] for c in cards], ["A", "事件2"])
         self.assertEqual(cards[0]["actions"],
@@ -420,23 +405,19 @@ class EventStreamTests(unittest.TestCase):
             {"name": "A", "trigger": "period", "arg": 100,
              "actions": [{"dir": "in", "param": "in_fire", "var": "x"}]}])
         self.engine.signal("x", 1)
-        self.assertEqual(self.engine.tick_event_cards(0.0), 1)  # 首拍即到期
+        self.assertEqual(self.engine.tick_event_cards(0.0), 1)
         self.assertEqual(self.sent, [("in_fire", 1)])
-        self.assertEqual(self.engine.tick_event_cards(0.05), 0)  # 未到期
-        # 到期：卡片触发计数为 1，但同值动作被去重、不重复派发
+        self.assertEqual(self.engine.tick_event_cards(0.05), 0)
         self.assertEqual(self.engine.tick_event_cards(0.1), 1)
         self.assertEqual(self.sent, [("in_fire", 1)])
-        # 变量值变化后才重新派发
         self.engine.signal("x", 0)
-        self.engine.tick_event_cards(0.21)     # 到期 → 派发 0
+        self.engine.tick_event_cards(0.21)
         self.engine.signal("x", 1)
-        self.assertEqual(self.engine.tick_event_cards(0.42), 1)  # → 派发 1
+        self.assertEqual(self.engine.tick_event_cards(0.42), 1)
         self.assertEqual(self.sent, [("in_fire", 1), ("in_fire", 0),
                                      ("in_fire", 1)])
 
     def test_period_dispatch_does_not_overwrite_manual_change(self):
-        # 周期参数驱动不得覆写手动控制：变量值未变时重复触发不派发，
-        # 设备被手动改变后的状态得以保留
         self.engine.set_event_cards([
             {"name": "A", "trigger": "period", "arg": 50,
              "actions": [{"dir": "in", "param": "in_strength_a",
@@ -444,7 +425,6 @@ class EventStreamTests(unittest.TestCase):
         self.engine.signal("x", 30)
         self.engine.tick_event_cards(0.0)
         self.assertEqual(self.sent, [("in_strength_a", 30)])
-        # 手动把设备调到 100（不经引擎）：变量仍是 30，周期触发不回写
         for t in (0.05, 0.10, 0.15):
             self.engine.tick_event_cards(t)
         self.assertEqual(self.sent, [("in_strength_a", 30)])
@@ -456,11 +436,11 @@ class EventStreamTests(unittest.TestCase):
              "actions": [{"dir": "in", "param": "in_strength_a",
                           "var": "x"}]}])
         self.engine.signal("x", 10)
-        self.assertEqual(self.engine.tick_event_cards(0.0), 0)  # 首拍采基线
+        self.assertEqual(self.engine.tick_event_cards(0.0), 0)
         self.engine.signal("x", 20)
         self.assertEqual(self.engine.tick_event_cards(0.05), 1)
         self.assertEqual(self.sent, [("in_strength_a", 20)])
-        self.assertEqual(self.engine.tick_event_cards(0.10), 0)  # 值未变
+        self.assertEqual(self.engine.tick_event_cards(0.10), 0)
 
     def test_if_trigger_rising_edge(self):
         self.engine.set_event_cards([
@@ -469,12 +449,12 @@ class EventStreamTests(unittest.TestCase):
         self.engine.signal("x", 5)
         self.assertEqual(self.engine.tick_event_cards(0.0), 0)
         self.engine.signal("x", 15)
-        self.assertEqual(self.engine.tick_event_cards(0.05), 1)  # 上升沿
-        self.assertEqual(self.engine.tick_event_cards(0.10), 0)  # 持真不重复
+        self.assertEqual(self.engine.tick_event_cards(0.05), 1)
+        self.assertEqual(self.engine.tick_event_cards(0.10), 0)
         self.engine.signal("x", 3)
-        self.engine.tick_event_cards(0.15)                       # 归假
+        self.engine.tick_event_cards(0.15)
         self.engine.signal("x", 30)
-        self.assertEqual(self.engine.tick_event_cards(0.20), 1)  # 再次上升沿
+        self.assertEqual(self.engine.tick_event_cards(0.20), 1)
 
     def test_if_trigger_bare_bool_var(self):
         self.engine.set_event_cards([
@@ -488,7 +468,7 @@ class EventStreamTests(unittest.TestCase):
             {"name": "A", "trigger": "period", "arg": 50,
              "actions": [{"dir": "in", "param": "in_strength_a", "var": "v"},
                          {"dir": "in", "param": "in_fire", "var": "v"}]}])
-        self.engine.signal("v", 999)     # 强度钳到 200；fire 是 Bool 归 1
+        self.engine.signal("v", 999)
         self.engine.tick_event_cards(0.0)
         self.assertEqual(self.sent, [("in_strength_a", 200), ("in_fire", 1)])
 
@@ -516,16 +496,15 @@ class EventStreamTests(unittest.TestCase):
         self.assertFalse(self.engine.has_events())
 
     def test_temps_join_event_actions(self):
-        # 临时变量随 pump 前进，事件动作引用其当前值
         self.engine.set_temp_rows([{"name": "count", "expr": "{count}+1"}])
         self.engine.set_event_cards([
             {"name": "A", "trigger": "period", "arg": 50,
              "actions": [{"dir": "in", "param": "in_strength_a",
                           "var": "count"}]}])
-        self.assertEqual(self.engine.temps["count"], 1.0)  # 装载求值一轮
+        self.assertEqual(self.engine.temps["count"], 1.0)
         self.engine.tick_event_cards(0.0)
         self.assertEqual(self.sent, [("in_strength_a", 1)])
-        self.engine.pump()                                 # count=2
+        self.engine.pump()
         self.engine.tick_event_cards(0.05)
         self.assertEqual(self.sent[-1], ("in_strength_a", 2))
 

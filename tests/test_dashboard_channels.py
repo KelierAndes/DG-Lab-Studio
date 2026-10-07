@@ -1,4 +1,3 @@
-"""仪表盘模块通道聚合（ui.live 的 module_* / *_value_rows）回归测试。"""
 from __future__ import annotations
 
 import os
@@ -47,7 +46,6 @@ class ModuleChannelRowTests(unittest.TestCase):
                          ["模块→核心", "核心→模块"])
         self.assertEqual(rows[0]["probe"], "数据流动中")
         self.assertIs(rows[0]["probe_ok"], True)
-        # 对端没通信时即使 out_values 有值也算等待回传
         engine2, _rt2 = _engine_with_module(out_values={"f": 1}, last_rx=None)
         rows2 = live.module_channel_rows(engine2)
         self.assertEqual(rows2[0]["probe"], "等待数据")
@@ -102,7 +100,6 @@ class ModuleChannelRowTests(unittest.TestCase):
 
 
 class OscDedupTests(unittest.TestCase):
-    """OSC 桥运行时由模块通道行统一表达，基础条目不再重复列出。"""
 
     def _osc_engine(self, running=True, enabled=True):
         eng = MappingEngine(lambda key, value: None)
@@ -136,7 +133,6 @@ class OscDedupTests(unittest.TestCase):
 
 
 class ModuleStateRowTests(unittest.TestCase):
-    """已启用未运行的联动模块显示「未启用」提示行；卸载后不显示。"""
 
     def _engine(self, metas, instances):
         return SimpleNamespace(modules=SimpleNamespace(
@@ -191,7 +187,6 @@ class ModuleStateRowTests(unittest.TestCase):
 
 class ModuleValueRowTests(unittest.TestCase):
     def test_input_values_from_all_modules(self):
-        # 只显示被事件流/临时变量引用的参数,未引用的原始参数不上表
         cfg = {"temps": [{"name": "HLost", "expr": "{HPmax} - {HP}"}],
                "events": [{"name": "拍", "trigger": "if",
                            "arg": "Orgasming", "actions": []}]}

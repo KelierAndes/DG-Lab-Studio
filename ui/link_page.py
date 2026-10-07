@@ -21,18 +21,10 @@ from ui import theme, widgets as W
 from ui.paths import xaml
 from ui.region_pick import pick_crop, pick_region
 
-# 大卡片按「联动模块」分类：每张模块卡片共用统一模板
-# （实时数据 → 事件流 → 临时变量 → 模块设置）。数据处理为事件流推送：
-# 事件小卡片 = 驱动事件（周期更新 / 变量变更时 / if 判断）+ 动作直列
-# （输入 核心参数 ← 变量 / 输出 核心信号 → 变量），动作不做运算，
-# 运算只属于临时变量表；四个区域均可折叠——模块运行中展开，已停用的
-# 模块卡片保留在本页并整体折叠（开关重开即恢复，不从联动页移除）。
 HIDDEN_MODULES = {"config_init"}
 
-# 临时变量表：变量名 | 表达式 | 实时值 | 操作
 _TEMP_COLS = (W.fixed(340), W.star(1.2), W.fixed(66), W.auto())
 _TEMP_HEAD = ("变量名", "表达式（空 = 模块维护）", "实时值", "")
-# 事件动作行：方向 | 核心参数 | 流向 | 变量 | 实时值 | 操作
 _ACTION_COLS = (W.fixed(44), W.star(1.1), W.fixed(26), W.star(1),
                 W.fixed(64), W.auto())
 
@@ -40,12 +32,9 @@ _GAP = Thickness(12, 0, 0, 0)
 _BTN_GAP = Thickness(4, 0, 0, 0)
 _ROW_H = 44
 
-# 运算符菜单：显示字符 → 插入片段。全部半角符号（同一字体渲染、宽度一致、
-# 默认模板左对齐成列）；× ÷ 仅显示用，插入片段仍是 expr 支持的 * /。
 _EXPR_OPS = (("(", " ("), ("+", " + "), ("-", " - "), ("×", " * "),
              ("÷", " / "), (")", ")"))
 
-# 实时参数（画面识别）：参数名 ← 检测行为；各行为的缺省字段
 _DETECTOR_KINDS = (("color", "检测颜色"), ("image", "检测图片"),
                    ("number", "检测数值"), ("bar", "检测数值条"))
 _DETECTOR_DEFAULTS = {
@@ -76,8 +65,6 @@ def _vcenter(el):
 
 
 def _inner_text_box(box):
-    """AutoSuggestBox 自身没有光标/选区 API：取其模板内的编辑框，
-    模板未应用时返回 None。"""
     stack = [box]
     while stack:
         el = stack.pop()
@@ -102,8 +89,6 @@ def _append_token(box, token: str, touched, on_commit=None) -> None:
     def handler(sender, args):
         text = box.Text or ""
         start, selected = len(text), 0
-        # 用户聚焦过输入框：插到光标处（有选区则整体替换），而非总是追加
-        # 到末尾——否则先写好表达式再点（ 括号，括号会落到末尾包不住要括的部分
         inner = _inner_text_box(box) if touched["on"] else None
         if inner is not None:
             try:
@@ -119,8 +104,6 @@ def _append_token(box, token: str, touched, on_commit=None) -> None:
             except Exception:
                 pass
         if on_commit is not None:
-            # 程序化赋值不保证回声 TextChanged，直接提交落盘
-            #（提交方幂等，与回声路径重复调用无害）
             on_commit((box.Text or "").strip())
     return handler
 
@@ -143,7 +126,6 @@ class LinkPage(XamlClass, Page):
         self.LoadComponentFromFile(xaml("LinkPage.xaml"), encoding="utf-8")
         self.rebuild()
 
-    # ------------------------------------------------------------------ 框架
 
     def tick(self) -> None:
         now = time.monotonic()
@@ -190,7 +172,6 @@ class LinkPage(XamlClass, Page):
             for meta in self.shell.engine.modules.list_modules():
                 if meta["id"] in HIDDEN_MODULES or not meta["config"]:
                     continue
-                # 已停用模块的卡片保留（折叠展示），开关重新打开即恢复
                 self._card_modules.append(meta["id"])
                 content.Children.Append(self._module_card(meta))
             if not self._card_modules:
@@ -202,7 +183,6 @@ class LinkPage(XamlClass, Page):
             self._updating = False
 
     def flush_config(self) -> None:
-        # 配置控件为写穿式（JsonDict），编辑即落盘，无需集中 flush
         pass
 
     def _save(self) -> None:
@@ -210,11 +190,9 @@ class LinkPage(XamlClass, Page):
         modules = self.shell.engine.modules
         for meta in modules.list_modules():
             if modules.instance(meta["id"]) is not None:
-                # 原生 reload_config + 宿主逻辑表（临时变量/事件流）
                 self.shell.submit(modules.reload(meta["id"]))
         self.shell.logs.append("设置已保存，运行中模块的映射表已重载")
 
-    # ------------------------------------------------------------ 卡片模板
 
     def _card_shell(self, title: str, *, subtitle: str, symbol: str,
                     trailing=None, blocks: list) -> object:
@@ -234,7 +212,6 @@ class LinkPage(XamlClass, Page):
     def _block(self, caption: str, cols, head_names, rows, *,
                note: str = "", tail_button: bool = False,
                expanded: bool = True) -> object:
-        # caption 形如「标题（使用说明）」：标题进折叠头，说明留在展开区
         split = caption.find("（")
         title = caption if split < 0 else caption[:split]
         detail = "" if split < 0 else caption[split:]
@@ -275,8 +252,6 @@ class LinkPage(XamlClass, Page):
                 tb.Margin = _GAP
             g.Children.Append(W.put(tb, i))
         if tail_button and names and not names[-1]:
-            # auto 列无内容会塌缩为 0，导致 star 列变宽、表头整体右移；
-            # 放一个不可见占位按钮撑起与数据行删除按钮等宽的列。
             spacer = W.text_button("删除", symbol="Delete")
             spacer.Opacity = 0
             spacer.IsHitTestVisible = False
@@ -286,14 +261,10 @@ class LinkPage(XamlClass, Page):
 
     def _expr_field(self, text: str, choices, *, placeholder: str,
                     on_commit) -> object:
-        """表达式编辑格：输入框 + 「参数」「运算」下拉，点选插入到光标处
-        （未聚焦过时追加到尾部）。"""
         box = W.suggest_box(text=text, choices=choices,
                             placeholder=placeholder, on_commit=on_commit)
         box.HorizontalAlignment = HorizontalAlignment.Stretch
         box.VerticalAlignment = VerticalAlignment.Center
-        # GotFocus 是路由事件：内部编辑框获得焦点时即冒泡到这里。
-        # 只有用户实际聚焦过才按光标插入；纯下拉点选流程保持尾部追加。
         touched = {"on": False}
         box.GotFocus += lambda s, e: touched.update(on=True)
         g = W.grid(W.star(1), W.auto(), W.auto())
@@ -320,8 +291,6 @@ class LinkPage(XamlClass, Page):
                     else (token, token)
                 item = MenuFlyoutItem()
                 item.Text = shown
-                # 默认模板：条目等宽、文字左对齐——符号天然成列；
-                # 显示字符全部半角（_EXPR_OPS），避免全角字形宽度不一
                 item.Click += _append_token(box, piece,
                                             touched or {"on": False},
                                             on_commit)
@@ -347,7 +316,6 @@ class LinkPage(XamlClass, Page):
                                                     on_click=on_click))
 
     def _status_trailing(self, module_id: str):
-        """模块卡片头部：状态 pill + 启用开关（安装/卸载语义与模块页一致）。"""
         modules = self.shell.engine.modules
         pill_host = W.box(v="center", h="right")
         running = bool((modules.meta(module_id) or {}).get("running"))
@@ -361,7 +329,6 @@ class LinkPage(XamlClass, Page):
             if bool(_t.IsOn):
                 self.shell.submit(self.shell.engine.modules.install(_mid))
             else:
-                # 停用不卸载：实例与导入缓存保留，卡片折叠保留在本页
                 self.shell.submit(self.shell.engine.modules.deactivate(_mid))
 
         toggle.Toggled += _changed
@@ -383,7 +350,6 @@ class LinkPage(XamlClass, Page):
             host.Child = self._make_pill(running)
 
     def _engine(self, module_id: str):
-        """运行中的映射引擎（OSC→bridge.engine，AIC→server.engine）。"""
         inst = self.shell.engine.modules.instance(module_id)
         runtime = getattr(inst, "bridge", None) or getattr(inst, "server", None)
         return getattr(runtime, "engine", None) if runtime is not None else None
@@ -406,7 +372,6 @@ class LinkPage(XamlClass, Page):
             value = engine.signals.get(name) if engine is not None else None
             tb.Text = _fmtv(value)
         for tb, module_id, name in self._live_temps:
-            # 临时变量真源在宿主（attach 后与引擎共享），停用模块仍可显示
             value = self.shell.engine.modules.temps_space(module_id).get(name)
             tb.Text = _fmtv(value)
         vals_cache: dict[str, dict] = {}
@@ -415,7 +380,7 @@ class LinkPage(XamlClass, Page):
             if spec.get("kind") == "var":
                 tb.Text = _fmtv(vals.get(str(spec.get("name") or "")))
                 continue
-            try:                                   # if 判断体：实时真假
+            try:
                 truth = bool_value(expr.evaluate(
                     expr.normalize(str(spec.get("cond") or "")), vals))
                 tb.Text = "真" if truth else "假"
@@ -423,8 +388,6 @@ class LinkPage(XamlClass, Page):
                 tb.Text = "—"
 
     def _event_values(self, module_id: str) -> dict:
-        """事件流可视化的值空间：引擎值空间（设备变量∪信号∪临时变量），
-        无引擎时退回宿主临时变量空间。"""
         eng = self._engine(module_id)
         if eng is not None:
             try:
@@ -433,7 +396,6 @@ class LinkPage(XamlClass, Page):
                 pass
         return self.shell.engine.modules.temps_space(module_id)
 
-    # ------------------------------------------------------- 统一模块卡片
 
     def _module_card(self, meta: dict) -> object:
         module_id = meta["id"]
@@ -441,18 +403,13 @@ class LinkPage(XamlClass, Page):
         spec = modules.config_spec_for(module_id)
         cfg = modules.settings_for(module_id)
         varpool = self._var_pool(module_id)
-        # 事件流面板可选显示：模块有映射引擎（可执行动作）或已配置事件卡片
         has_events = bool([e for e in (cfg.get("events") or [])
                            if isinstance(e, dict)]) \
             or self._engine(module_id) is not None
-        # 临时变量面板：有映射引擎（表达式可被求值）或模块声明了 temps
-        # （META["temps"] / temp_specs）或已有配置行——三者其一即显示；
-        # 模块不声明也能用（有引擎即可添加行），声明行仅作模块维护展示
         has_temps = self._engine(module_id) is not None \
             or bool(modules.temp_specs_for(module_id)) \
             or bool([r for r in (cfg.get("temps") or [])
                      if isinstance(r, dict)])
-        # 模块运行中面板展开，已停止则整卡折叠（卡片保留不移除）
         running = bool((modules.meta(module_id) or {}).get("running"))
         blocks = [self._realtime_block(module_id, cfg, expanded=running)]
         if has_events:
@@ -472,11 +429,9 @@ class LinkPage(XamlClass, Page):
             trailing=self._status_trailing(module_id),
             blocks=blocks)
 
-    # ------------------------------------------------------------- 实时数据
 
     def _realtime_block(self, module_id: str, cfg: dict, *,
                         expanded: bool = True) -> object:
-        """实时数据子卡片：模块收到的输入数值实时状态（中英对照网格）。"""
         meta = self.shell.engine.modules.meta(module_id) or {}
         if meta.get("realtime_manager"):
             return self._detector_block(module_id, cfg, expanded=expanded)
@@ -521,7 +476,6 @@ class LinkPage(XamlClass, Page):
                                     trimming=True))
         return cell
 
-    # ------------------------------------------------ 实时参数（画面识别）
 
     def _detector_block(self, module_id: str, cfg: dict, *,
                         expanded: bool = True) -> object:
@@ -700,7 +654,6 @@ class LinkPage(XamlClass, Page):
         cell.Children.Append(control)
         return cell
 
-    # -- 实时参数提交与截图选取 -------------------------------------
 
     def _commit_detector(self, module_id: str, entry: dict,
                          changes: dict) -> None:
@@ -790,7 +743,6 @@ class LinkPage(XamlClass, Page):
                 return
             entry["rect"] = list(rect)
             if str(entry.get("kind")) == "bar":
-                # 整条截图选取：0%/100% 位置自动取区域左/上缘与右/下缘
                 x, y, w, h = rect
                 if w >= h:
                     entry["min"], entry["max"] = x, x + w
@@ -824,7 +776,6 @@ class LinkPage(XamlClass, Page):
     def _save_and_reload(self, module_id: str) -> None:
         cfg = self.shell.engine.modules.settings_for(module_id)
         cfg.save()
-        # 原生 reload_config + 宿主逻辑表（临时变量/事件流）一并重载
         self.shell.submit(self.shell.engine.modules.reload(module_id))
 
     def _detector_error(self, module_id: str, entry: dict) -> str:
@@ -837,8 +788,6 @@ class LinkPage(XamlClass, Page):
 
 
     def _var_pool(self, module_id: str) -> list[str]:
-        """表达式变量池：模块声明参数 ∪ 模块自定义参数 ∪ 临时变量 ∪
-        核心输出参数 ∪ 运行期信号。"""
         pool: set[str] = set()
         meta = self.shell.engine.modules.meta(module_id) or {}
         for name in (meta.get("params") or {}):
@@ -868,7 +817,6 @@ class LinkPage(XamlClass, Page):
                 pool.add(sp["key"])
         pool.update(("Strength", "Limit", "max", "Battery", "Connected",
                      "Pressure", "Action"))
-        # 临时变量（模块声明 + 用户表达式行）全部可被表达式引用
         for spec in self.shell.engine.modules.temp_specs_for(module_id):
             if spec.get("key"):
                 pool.add(str(spec["key"]))
@@ -879,11 +827,6 @@ class LinkPage(XamlClass, Page):
         return sorted(pool)
 
     def _temp_pool(self, module_id: str) -> list[str]:
-        """事件流绑定用变量池：仅临时参数（模块自动注册 + 用户表达式行）。
-
-        与表达式变量池（_var_pool，可含核心参数）不同，事件流动作绑定
-        只允许引用临时变量——数据一律经临时变量流转。
-        """
         modules = self.shell.engine.modules
         pool: set[str] = set()
         for spec in modules.temp_specs_for(module_id):
@@ -895,14 +838,12 @@ class LinkPage(XamlClass, Page):
                 pool.add(str(row["name"]))
         return sorted(pool)
 
-    # ------------------------------------------------------------- 事件流
 
     _TRIGGERS = (("period", "周期更新"), ("change", "变量变更时"),
                  ("if", "if 判断"))
 
     def _events_block(self, module_id: str, cfg: dict, varpool, *,
                       expanded: bool = True) -> object:
-        """事件流大卡片：事件小卡片列表（驱动事件 + 动作直列）。"""
         inner = W.stack(spacing=8, h="stretch")
         inner.Children.Append(W.text(
             "每张事件小卡片 = 驱动事件 + 动作直列：周期更新（按毫秒轮询）、"
@@ -958,7 +899,7 @@ class LinkPage(XamlClass, Page):
                     and _c.get("trigger") != self._TRIGGERS[idx][0]:
                 _c["trigger"] = self._TRIGGERS[idx][0]
                 _cfg.save()
-                self.rebuild()          # 驱动参数控件随种类切换
+                self.rebuild()
 
         combo.SelectionChanged += _pick_trigger
         head.Children.Append(W.put(_vcenter(combo), 1))
@@ -999,7 +940,6 @@ class LinkPage(XamlClass, Page):
         return W.panel(inner, padding=10)
 
     def _trigger_arg(self, module_id: str, cfg: dict, card: dict, varpool):
-        """驱动事件参数控件：周期毫秒 / 变量下拉+实时值 / 判断体+真假。"""
         trigger = str(card.get("trigger") or "period")
 
         def _commit(value, _c=card, _cfg=cfg):
@@ -1050,8 +990,6 @@ class LinkPage(XamlClass, Page):
 
     def _var_combo(self, current: str, varpool, cell: dict,
                    on_pick=None) -> object:
-        """变量下拉：首项「（未选择）」，池外的存量引用追加在尾；
-        选择即更新 cell（实时可视化跟随切换），on_pick 提交落盘。"""
         pool = ["（未选择）"] + [str(name) for name in varpool]
         current = str(current or "").strip()
         if current and current not in pool:
@@ -1108,7 +1046,6 @@ class LinkPage(XamlClass, Page):
                                  selected=idx))
         combo.SelectionChanged += _pick
         cell: dict = {"kind": "var", "name": str(action.get("var") or "")}
-        # 事件流绑定的变量只允许临时参数（模块自动注册 + 用户表达式行）
         var_combo = self._var_combo(cell["name"], self._temp_pool(module_id),
                                     cell, on_pick=_commit_var)
         live_tb = W.text(_fmtv(self._event_values(module_id)
@@ -1132,7 +1069,6 @@ class LinkPage(XamlClass, Page):
 
     def _param_choices(self, cfg: dict,
                        direction: str) -> list[tuple[str, str]]:
-        """动作可选括参数：输入 = 核心输入参数；输出 = 核心输出信号。"""
         if direction == "in":
             return list(self._core_choices)
         return self._output_ids(cfg)
@@ -1190,7 +1126,6 @@ class LinkPage(XamlClass, Page):
 
     def _temps_block(self, module_id: str, cfg: dict, varpool, *,
                      expanded: bool = True) -> object:
-        """临时变量面板：模块声明行（模块维护）+ 用户表达式行（引擎求值）。"""
         modules = self.shell.engine.modules
         declared_keys = {str(s.get("key") or "")
                          for s in modules.temp_specs_for(module_id)}
@@ -1299,7 +1234,6 @@ class LinkPage(XamlClass, Page):
         cfg.save()
         self.rebuild()
 
-    # -------------------------------------------------------------- 模块设置
 
     def _settings_block(self, module_id: str, spec: dict, cfg: dict,
                         varpool) -> object:
@@ -1317,7 +1251,6 @@ class LinkPage(XamlClass, Page):
             if i:
                 body.Children.Append(W.divider())
             body.Children.Append(row)
-        # 模块设置默认折叠：卡片纵向以映射表为主，设置项点击标题展开
         return W.panel(W.collapsible(
             "OSC 地址与端口" if module_id == "osc_bridge" else "模块设置",
             body,
@@ -1411,7 +1344,6 @@ class LinkPage(XamlClass, Page):
         return f"{shown} {unit}".strip()
 
     def _map_field(self, key: str, item: dict, cfg: dict) -> object:
-        """map 型配置（如设备参数前缀）：每个键一个可编辑小格。"""
         table = cfg.setdefault(key, {})
         defaults = dict(item.get("default") or {})
         keys = list(dict.fromkeys([*table.keys(), *defaults.keys()]))

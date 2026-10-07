@@ -1,11 +1,3 @@
-"""扩展探针:确定哪类句柄会阻止整目录改名/单文件改名。
-
-场景 A: 普通 open() 句柄(无 FILE_SHARE_DELETE)
-场景 B: CreateFileMapping 数据映射
-场景 C: 子目录句柄
-场景 D: 普通 open() 句柄下单文件原位改名
-对照: 映像锁(前一轮已测,整目录改名成功)
-"""
 import ctypes
 import ctypes.wintypes as wt
 import os
@@ -62,7 +54,7 @@ def main():
     def data_map():
         h = make_handle(DLL, 0)
         mapping = ctypes.windll.kernel32.CreateFileMappingW(
-            h, None, 0x02, 0, 0, None)  # PAGE_READONLY
+            h, None, 0x02, 0, 0, None)
         assert mapping
         return (h, mapping)
 

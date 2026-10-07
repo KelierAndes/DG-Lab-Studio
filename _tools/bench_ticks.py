@@ -1,10 +1,3 @@
-"""页面 tick/rebuild 耗时基准(一次性脚本)。
-
-启动真实应用,注入带映射引擎与数据的假模块,逐页测量:
-- rebuild 单次耗时(整页 XAML 重建)
-- tick 数据刷新路径耗时(节流到期后的实际工作量)
-- connect tick 每 10ms 心跳原本执行的负载
-"""
 import ctypes
 import os
 import statistics
@@ -28,7 +21,7 @@ class _FakeModules:
         self._temps: dict[str, dict] = {}
         from dglab.mapping import MappingEngine
         self._engine = MappingEngine(lambda k, v: None)
-        for i in range(12):                      # 模拟 12 路输入信号
+        for i in range(12):
             self._engine.signal(f"param{i}", float(i))
         self._engine.set_temp_rows(
             [{"name": f"t{i}", "expr": f"{{t{i}}}+1"} for i in range(6)])
@@ -119,7 +112,7 @@ def _run_bench():
     from ui.shell import App
     win = App.window
     fake = _FakeModules()
-    win.engine.modules = fake          # 仅注入模块;state/logs 用真实对象
+    win.engine.modules = fake
 
     def run(tag, page):
         print(f"[{tag}]")

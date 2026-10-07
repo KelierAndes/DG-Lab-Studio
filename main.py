@@ -18,7 +18,6 @@ except Exception:
 if getattr(sys, "frozen", False):
     _exe_dir = os.path.dirname(os.path.abspath(sys.executable))
     if _exe_dir not in sys.path:
-        # modules/ 与 exe 同级：包导入（modules.<id>.server）从 exe 旁解析
         sys.path.insert(0, _exe_dir)
 
 from win32more.winui3 import XamlApplication
@@ -55,7 +54,6 @@ def _run_selftest() -> None:
         def probe_and_close():
             try:
                 win = App.window
-                # 注入模拟设备状态，验证实时数据装配路径
                 from dglab.state import EngineState, Slot
 
                 fake = EngineState(backend="ble", connected=True, paired=True,
@@ -87,7 +85,6 @@ def _run_selftest() -> None:
                         REPORT[f"tick_{tag}_ok"] = False
                         REPORT["tick_error"] = f"{tag}: {exc!r}"
 
-                # 模块页首次构建应自动拉取在线清单（后台线程，成败不入断言）
                 REPORT["modules_autofetch_ok"] = (
                     win._page("modules")._fetch_started)
                 control = win._page("control")
@@ -112,8 +109,6 @@ def _run_selftest() -> None:
 
                 from ui import live as ui_live
                 action_keys = [k for k, _ in ui_live.button_actions(win.engine)]
-                # 联动模块已外置（dgstudio-modules-market 按需下载）：osc 模块
-                # 未下载、或已下载但未加载（自检不启动模块）时跳过
                 osc_meta = win.engine.modules.meta("osc_bridge") or {}
                 osc_ready = bool(osc_meta.get("loaded"))
                 REPORT["module_action_ok"] = (
@@ -134,8 +129,8 @@ def _run_selftest() -> None:
                 control.flash_button(13, True)
                 lit = glow is not None and glow.Visibility == Visibility.Visible
                 control.flash_button(13, False)
-                held = glow.Visibility == Visibility.Visible  # 最短点亮窗口
-                control._glow_state[13] = (0.0, 0.0)          # 模拟到期
+                held = glow.Visibility == Visibility.Visible
+                control._glow_state[13] = (0.0, 0.0)
                 control._refresh_glows()
                 REPORT["glow_flash_ok"] = (lit and held
                                            and glow.Visibility == Visibility.Collapsed)
@@ -149,7 +144,7 @@ def _run_selftest() -> None:
                 card_ids = [meta["id"]
                             for meta in win.engine.modules.list_modules()
                             if meta["id"] not in HIDDEN_MODULES
-                            and meta["config"]]  # 已停用模块卡片也保留
+                            and meta["config"]]
                 REPORT["link_cards_ok"] = (link._card_modules == card_ids)
 
                 before = str(win.RootGrid.RequestedTheme)

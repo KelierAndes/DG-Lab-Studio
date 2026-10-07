@@ -20,8 +20,6 @@ OVC_BUTTON_BITS = [
     (8, "Up"), (9, "Down"), (10, "Left"), (11, "Right"),
     (12, "B"), (13, "A"), (14, "G"), (15, "D"),
 ]
-# 内置动作（与 Engine._OVC_BUTTON_ACTIONS 一一对应）；模块动作（如 OSC）由
-# button_actions(engine) 动态追加，随模块装卸出现与消失。
 BUTTON_ACTIONS = [
     ("none", "无"),
     ("a_strength_up", "A 通道强度 +10"), ("a_strength_down", "A 通道强度 -10"),
@@ -40,7 +38,6 @@ BUTTON_ACTION_LABELS = dict(BUTTON_ACTIONS)
 
 
 def button_actions(engine) -> list[tuple[str, str]]:
-    """绑定选择框的全部动作项：内置 + 键盘注入 + 已加载模块注册的动作。"""
     items = list(BUTTON_ACTIONS)
     items.append(KEY_BINDING_ACTION)
     try:
@@ -238,8 +235,6 @@ def osc_probe_card(engine) -> dict:
 
 
 def _osc_module_active(engine) -> bool:
-    """OSC 桥是否以模块通道形式在列（运行中且有映射行）——此时老的
-    「VRChat OSC 输入/输出」基础条目与之是同一条通道，不再单列。"""
     try:
         for module_id, _name, eng, runtime in module_engines(engine):
             if module_id == "osc_bridge" \
@@ -263,7 +258,6 @@ def _osc_bridge_running(engine) -> bool:
 
 
 def _osc_module_installed(engine) -> bool:
-    """OSC 模块是否已安装（启用）——卸载后概览不再显示其基础条目。"""
     try:
         return any(m["id"] == "osc_bridge" and m.get("enabled")
                    for m in engine.modules.list_modules())
@@ -272,13 +266,6 @@ def _osc_module_installed(engine) -> bool:
 
 
 def link_counts(engine, state: EngineState) -> dict:
-    """输入/输出链路计数与明细。
-
-    输入链路：控制与遥测进入应用的路径（OSC 输入、负鼠按键绑定、灵猫传感器、
-    各联动模块的「模块 → 核心」映射通道）。
-    输出链路：应用向外下发数据的路径（OSC 输出、每台已接入输出设备、
-    各联动模块的「核心 → 模块」映射通道）。
-    """
     osc_module = _osc_module_active(engine)
     osc_on = _osc_bridge_running(engine) and not osc_module
     inputs: list[tuple[str, str]] = []
@@ -312,11 +299,6 @@ def link_counts(engine, state: EngineState) -> dict:
 
 
 def module_engines(engine) -> list[tuple[str, str, object, object]]:
-    """运行中联动模块的映射引擎 ``(module_id, 显示名, MappingEngine, runtime)``。
-
-    模块实例以 bridge（OSC）或 server（游戏数据类）属性承载共享映射引擎；
-    runtime 用于探活（其 last_rx / _last_rx 记录对端最近通信时间）。
-    """
     out: list[tuple[str, str, object, object]] = []
     try:
         metas = engine.modules.list_modules()
@@ -337,7 +319,6 @@ def module_engines(engine) -> list[tuple[str, str, object, object]]:
 
 
 def _runtime_fresh(runtime) -> bool:
-    """对端 5 秒内有过通信（OSC 收包 / 游戏 POST）视为数据流动。"""
     last = getattr(runtime, "last_rx", None)
     if last is None:
         last = getattr(runtime, "_last_rx", None)
@@ -345,14 +326,6 @@ def _runtime_fresh(runtime) -> bool:
 
 
 def module_channel_rows(engine) -> list[dict]:
-    """联动模块双向通道行：模块→核心（输入）与 核心→模块（输出）各一条。
-
-    模块→核心行随模块运行而存在（0 条映射=「未配置映射」）；OSC 例外——
-    无映射行时由「VRChat OSC 输入」基础条目表达，不重复列。核心→模块行
-    仅在配置了输出行时出现。探活以**对端实际通信**为准：表达式错误 → 异常；
-    对端 5 秒内有收发 → 数据流动中 / 回传中；否则（对端未启动 / 未发数据）
-    → 等待，即使引擎已按缺省值算出输出也算未建立回传。
-    """
     rows: list[dict] = []
     for module_id, module_name, eng, runtime in module_engines(engine):
         errors = getattr(eng, "errors", {}) or {}
@@ -423,13 +396,6 @@ def stats(engine, log_buffer: LogBuffer) -> list[dict]:
 
 
 def module_data_sig(engine) -> tuple:
-    """联动模块结构签名（生命周期 + signals/out_values 键集合）。
-
-    供仪表盘 tick 判断是否需要整页重建：模块装卸启停、或收到过的新参数
-    名/回传字段名集合变化才触发。**不含数值**——数值变化由数据值卡的
-    live 行更新覆盖，否则周期事件流（50ms 写 out_values）会造成高频
-    全页重建。start/stop 不发 modules_changed 事件，靠本签名感知。
-    """
     sig: list[tuple] = []
     try:
         for meta in engine.modules.list_modules():
@@ -449,9 +415,6 @@ def module_data_sig(engine) -> tuple:
 
 
 def input_channel_rows(engine, state: EngineState) -> list[dict]:
-    """输入通道清单（含未启用的，界面据 enabled 显示状态胶囊）。"""
-    # OSC 桥运行且有映射行时由模块通道行统一表达（同一条通道，不重复列）；
-    # 模块已安装但未运行时显示「未启用」提示行；卸载后条目整体消失。
     show_osc_entry = _osc_module_installed(engine) and not _osc_module_active(engine)
     osc_on = _osc_bridge_running(engine)
     rows = []
@@ -485,7 +448,6 @@ def input_channel_rows(engine, state: EngineState) -> list[dict]:
             })
     running = {module_id for module_id, _n, _e, _rt in module_engines(engine)}
     for meta in _linkage_modules(engine):
-        # OSC 由上方专属条目表达；运行中模块由模块通道行表达；未安装不显示
         if (meta["id"] == "osc_bridge" or meta["id"] in running
                 or not meta.get("enabled")):
             continue
@@ -499,8 +461,6 @@ def input_channel_rows(engine, state: EngineState) -> list[dict]:
 
 
 def _linkage_modules(engine) -> list[dict]:
-    """声明了配置的联动模块（与联动页卡片同口径；config_init 无 config
-    声明自然排除，strength_logger 等非联动模块同样排除）。"""
     try:
         return [m for m in engine.modules.list_modules() if m.get("config")]
     except Exception:
@@ -516,7 +476,6 @@ def channel_alive_text(status: int) -> str:
 
 
 def output_channel_rows(state: EngineState) -> list[dict]:
-    """输出通道行：每台输出设备每通道一条，含探活（channel_status）。"""
     rows: list[dict] = []
     for sid in sorted(state.slots):
         slot = state.slots[sid]
@@ -545,12 +504,6 @@ def _input_value_text(value) -> str:
 
 
 def _used_stream_vars(engine, module_id: str) -> set[str]:
-    """事件流已建立引用的变量集：动作 var/param、变更触发变量、
-    if 判断体与临时变量表达式中的 {变量}、临时变量名本身。
-
-    主页参数监控据此过滤——模块收到的原始参数只有被数据流引用才上表，
-    未建立流的无名参数不再出现。
-    """
     used: set[str] = set()
     try:
         cfg = engine.modules.settings_for(module_id)
@@ -580,12 +533,6 @@ def _used_stream_vars(engine, module_id: str) -> set[str]:
 
 
 def input_value_rows(engine, state: EngineState) -> list[dict]:
-    """输入数据值：运行中模块被数据流引用的输入信号 + 临时变量 + 灵猫
-    传感器遥测。
-
-    模块收到的原始参数只有被事件流/临时变量引用才上表（未建立流的参数
-    不出现）；临时变量本身即已建立的流，全量显示。
-    """
     rows: list[dict] = []
     for module_id, module_name, eng, _rt in module_engines(engine):
         used = _used_stream_vars(engine, module_id)
@@ -614,7 +561,6 @@ def input_value_rows(engine, state: EngineState) -> list[dict]:
 
 
 def module_output_value_rows(engine) -> list[dict]:
-    """输出数据值的模块段：各运行中模块回传字段（核心 → 模块）的实时值。"""
     rows: list[dict] = []
     for _module_id, module_name, eng, _rt in module_engines(engine):
         for name in sorted(getattr(eng, "out_values", {}) or {}):
@@ -627,7 +573,6 @@ def module_output_value_rows(engine) -> list[dict]:
 
 
 def output_value_rows(engine, state: EngineState) -> list[dict]:
-    """输出数据值：每台输出设备各通道的当前强度与波形。"""
     try:
         waves = engine.wave_selection()
     except Exception:

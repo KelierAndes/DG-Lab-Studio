@@ -1,11 +1,3 @@
-"""联动页模块卡片可视化预览（一次性脚本，不入测试）。
-
-启动真实 Xaml 应用 → 注入假模块管理器 → 构建含「模块设置」折叠面板的
-卡片 → 分别截取折叠/展开两种状态 → 退出。输出 _tools/_preview/*.png。
-
-编排注意：UI 线程内 sleep 会卡渲染（PrintWindow 截到旧帧），因此导航与
-展开在 UI 线程（经 ui_queue），延时与截图在独立线程。
-"""
 import ctypes
 import os
 import struct
@@ -27,7 +19,6 @@ class _Cfg(dict):
 
 
 class _FakeModules:
-    """link 页卡片所需的 ModuleManager 最小表面。"""
 
     def __init__(self):
         self.running = False
@@ -79,13 +70,12 @@ class _FakeModules:
         return self.cfg
 
     def temp_specs_for(self, module_id):
-        return []          # 模块未声明 temps:验证「有引擎即显示」的修复
+        return []
 
     def temps_space(self, module_id):
         return self._temps.setdefault(module_id, {})
 
     def instance(self, module_id):
-        # 模块带映射引擎(同 alice_cradle 的 server.engine)
         from types import SimpleNamespace
         return SimpleNamespace(bridge=SimpleNamespace(engine=self._engine))
 
@@ -100,7 +90,6 @@ def grab(hwnd, path):
     mem = gdi32.CreateCompatibleDC(hdc)
     bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
     gdi32.SelectObject(mem, bmp)
-    # PW_RENDERFULLCONTENT：DirectComposition 内容也能截到
     user32.PrintWindow(hwnd, mem, 2)
     bmi = ctypes.c_buffer(40)
     struct.pack_into("<IiiHHIIiiII", bmi, 0, 40, w, -h, 1, 32, 0,
@@ -130,14 +119,12 @@ def main():
     W.collapsible = spy
 
     def navigate():
-        # UI 线程：注入假模块管理器（running=True → 面板展开显示事件流）
         win = App.window
         fake = _FakeModules()
         fake.running = True
         win.engine.modules = fake
         win.goto("link")
         win._page("link").tick()
-        # 喂模拟信号:loud=55(if 真)、beat=3(动作变量可视化)、beat 经引擎求值
         fake._engine.signal("loud", 55)
         fake._engine.signal("beat", 3)
         threading.Thread(target=shot_stopped, daemon=True).start()

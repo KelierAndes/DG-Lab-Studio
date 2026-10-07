@@ -1,15 +1,3 @@
-"""核心可操作参数目录：联动可读写的一切参数都由核心定义，参数名固定不可改。
-
-* 输入参数（模块 → 核心 → 设备）：郊狼 / 负鼠的通道强度、波形选择、波形步进、
-  瞬时脉冲、开火以及全局急停，参数 id 即 ``in_*`` / ``in_ovc_*``；
-* 输出参数（核心 → 模块）：设备实时状态信号，参数 id 为 ``家族.信号`` 或
-  ``家族.设备序号.信号``（如 ``COYOTE.StrengthA``、``COYOTE.2.Battery``），
-  外加全局 ``Action``（App 按键反馈）。
-
-联动模块的映射表以这些参数 id 为锚点：核心参数名不可更改，模块一侧用于
-接收的字段名（头像参数名、游戏侧字段名）可由用户自由重命名。
-派发执行器由本模块统一构造，OSC 与游戏数据类模块共用同一套语义。
-"""
 
 from __future__ import annotations
 
@@ -18,8 +6,6 @@ from typing import Any, Callable
 
 from dglab.waves import wave_order
 
-# 脉冲流推帧节流下限（秒）：设备按 100ms/帧消费，事件流周期再短也最多
-# 10 帧/秒，避免推入快于消费造成播放队列积压（延迟累积）
 PULSE_PUSH_MIN_INTERVAL_S = 0.1
 
 __all__ = [
@@ -33,7 +19,6 @@ __all__ = [
 
 _FAMILY_LABELS = {"COYOTE": "郊狼", "OVC": "负鼠", "BMTR": "灵猫"}
 
-# 输入参数按 (家族, id 前缀) 展开；BMTR 暂无输入参数
 _INPUT_FAMILIES = (("COYOTE", "in_"), ("OVC", "in_ovc_"))
 
 
@@ -43,11 +28,6 @@ def family_label(family: str) -> str:
 
 
 def core_inputs() -> list[dict[str, Any]]:
-    """核心输入参数表（顺序即界面下拉顺序）。
-
-    项字段：``key`` 参数 id、``label`` 固定名称、``type`` Int/Bool、
-    ``range`` 表达式结果钳制范围、``family`` / ``channel``、``action`` 派发类型。
-    """
     specs: list[dict[str, Any]] = []
     for family, prefix in _INPUT_FAMILIES:
         zh = family_label(family)
@@ -91,7 +71,6 @@ def core_inputs() -> list[dict[str, Any]]:
 
 
 def input_specs() -> dict[str, dict[str, Any]]:
-    """参数 id → 输入参数定义。"""
     return {spec["key"]: spec for spec in core_inputs()}
 
 
@@ -107,12 +86,6 @@ _LIMIT_CACHE: dict[str, str | None] = {}
 
 
 def input_limit_signal(param_id: str) -> str | None:
-    """强度输入参数 id → 目标设备通道上限信号的输出参数 id（其余返回 None）。
-
-    ``in_coyote_strength_a`` → ``COYOTE.LimitA``：映射引擎据此把表达式结果
-    按当前通道上限（App 滑杆上限 / 设备上报 intensityMax）动态钳制；
-    上限信号取家族 1 号设备（派发器解析的正是该设备），非强度参数无上限语义。
-    """
     key = str(param_id or "")
     if key in _LIMIT_CACHE:
         return _LIMIT_CACHE[key]
@@ -124,9 +97,6 @@ def input_limit_signal(param_id: str) -> str | None:
     return out
 
 
-# ---- 核心输出参数（设备实时状态） -------------------------------------------
-
-# 家族 → 信号定义：signal 信号名、type 值类型、desc 说明、getter 从 Slot 取值
 OUTPUT_SIGNALS: dict[str, tuple[dict, ...]] = {
     "COYOTE": (
         {"signal": "StrengthA", "type": "Int", "desc": "通道 A 当前强度",
@@ -159,14 +129,12 @@ OUTPUT_SIGNALS: dict[str, tuple[dict, ...]] = {
 }
 OUTPUT_SIGNALS["OVC"] = OUTPUT_SIGNALS["COYOTE"]
 
-# 全局输出参数：App 按键反馈（不依附具体设备）
 ACTION_OUTPUT = {"key": "Action", "signal": "Action", "type": "Int",
                  "family": "", "index": 0, "desc": "App 按键反馈 0-9",
                  "label": "App 按键反馈", "getter": None}
 
 
 def output_key(family: str, index: int, signal: str) -> str:
-    """输出参数 id：1 号设备用 ``家族.信号``，其余带设备序号。"""
     return (f"{family}.{signal}" if index <= 1
             else f"{family}.{index}.{signal}")
 
@@ -176,7 +144,6 @@ def output_signals(family: str) -> tuple[dict, ...]:
 
 
 def output_specs(family: str, index: int = 1) -> list[dict[str, Any]]:
-    """某家族某序号设备的输出参数定义（带 id 与固定名称）。"""
     zh = family_label(family)
     serial = "" if index <= 1 else f" {index} 号"
     out: list[dict[str, Any]] = []
@@ -192,7 +159,6 @@ _OUTPUT_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def output_spec(param_id: str) -> dict[str, Any] | None:
-    """按输出参数 id 解析定义（未接入设备时也能取到类型与说明）。"""
     key = str(param_id or "")
     if key in _OUTPUT_CACHE:
         return _OUTPUT_CACHE[key]
@@ -213,7 +179,6 @@ def output_spec(param_id: str) -> dict[str, Any] | None:
 
 
 def label_of(param_id: str) -> str:
-    """核心参数 id → 固定名称（输入或输出命名空间）。"""
     spec = input_spec(param_id)
     if spec is not None:
         return str(spec["label"])
@@ -224,7 +189,6 @@ def label_of(param_id: str) -> str:
 
 
 def device_state_values(state) -> dict[str, float]:
-    """EngineState → 全部核心输出参数实时值（``家族.信号`` 为键）。"""
     vals: dict[str, float] = {}
     if state is None:
         return vals
@@ -245,7 +209,6 @@ def device_state_values(state) -> dict[str, float]:
 
 
 def core_aliases(values: dict[str, float], family: str) -> dict[str, float]:
-    """``家族.信号`` 值表 → 1 号设备的短名别名（``Strength`` / ``max`` 等）。"""
     prefix = f"{str(family).upper()}."
     first = {key[len(prefix):]: value for key, value in values.items()
              if key.startswith(prefix) and key.count(".") == 1}
@@ -262,9 +225,6 @@ def core_aliases(values: dict[str, float], family: str) -> dict[str, float]:
 
 
 def core_alias_values(values: dict[str, float]) -> dict[str, float]:
-    """全部家族的短名别名：``家族+短名``（如 COYOTEmax）全量给出，
-    裸短名（``max`` / ``Strength`` / ``Pressure``…）按 郊狼 → 负鼠 → 灵猫
-    顺序取首个有该信号的家族，供映射表达式跨设备直接引用。"""
     out: dict[str, float] = {}
     for family in ("COYOTE", "OVC", "BMTR"):
         for name, value in core_aliases(values, family).items():
@@ -282,25 +242,14 @@ def _as_float(value) -> float:
         return 0.0
 
 
-# ---- 统一派发 ---------------------------------------------------------------
-
 def build_dispatchers(api, specs: list[dict] | None = None
                       ) -> dict[str, Callable[[int], None]]:
-    """核心输入参数 → 执行器 ``fn(value:int)``。
-
-    ``api`` 由模块适配，需提供：``run(coro)``、``resolve_slot(family)``、
-    ``set_strength`` / ``set_wave`` / ``fire_start`` / ``fire_stop`` /
-    ``push_pulse`` / ``emergency_stop`` / ``wave_order(family)`` /
-    ``wave_selection()``。
-    """
     out: dict[str, Callable[[int], None]] = {}
     for spec in (core_inputs() if specs is None else specs):
         out[spec["key"]] = _dispatcher(spec, api)
     return out
 
 
-# 家族限定参数的派发目标哨兵：目标家族不在场时跳过本轮派发（不落到
-# 其他设备——适配层的跨家族兜底对显式家族目标不生效）
 _NO_TARGET = object()
 
 
@@ -311,13 +260,6 @@ def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
     edge = {"last": None}
 
     def slot():
-        """解析目标设备；家族限定参数做**严格家族校验**。
-
-        适配层可能带跨家族兜底（OSC 头像参数等场景）；核心参数 id 明确
-        带家族时以家族为准——兜底解析到其他家族视为未命中，跳过派发
-        （郊狼目标不再误触在场负鼠）。适配层未实现 slot_family 钩子时
-        维持旧行为（无法校验则接受解析结果）。
-        """
         try:
             sid = api.resolve_slot(family)
         except Exception:
@@ -333,14 +275,12 @@ def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
         return sid
 
     def target() -> str | None:
-        """家族限定参数的派发目标：家族不在场返回哨兵跳过本轮派发。"""
         sid = slot()
         if family and sid is None:
             return _NO_TARGET
         return sid
 
     def changed(value: int) -> bool:
-        """0↔非零边沿判定：引擎重载 / 首轮求值的重复派发不再重复动作。"""
         flag = _truthy(value)
         if edge["last"] is flag:
             return False
@@ -383,7 +323,6 @@ def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
         return run
 
     if action == "fire":
-        # 通道分离：带通道的 fire 参数只动本通道，家族级 fire 仍双通道
         fire_channel = str(spec.get("channel") or "").upper() or None
 
         def run(value: int) -> None:
@@ -399,11 +338,6 @@ def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
         return run
 
     if action == "pulse":
-        # 脉冲流数值推入：每次派发推一帧（周期事件每拍触发，非边沿动作），
-        # 派发侧按 0.1s 节流防止周期短于帧时长造成队列积压；
-        # 0 = 静音帧（电平 0，保留波形成形），10-1000 = 脉冲频率。
-        # 电平默认 100；模块适配层提供 pulse_level(channel) 时跟随响度
-        # （设备振动/波形包络随音频起伏，波形图出现高低变化）
         last_push = {"t": 0.0}
 
         def run(value: int) -> None:

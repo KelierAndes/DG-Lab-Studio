@@ -203,7 +203,6 @@ class SocketV4Client:
                 cycle = self._cycles.get(key)
                 if cycle is None or not cycle.frames:
                     if key in self._pulse_keys:
-                        # 外部脉冲流：帧未到前不下发静默帧，保持队列为空等待推流
                         continue
                     self.set_wave_frames(sid, ch,
                                          getattr(self, "_silent_frames", None))
@@ -305,8 +304,6 @@ class SocketV4Client:
         await self._ws.send(json.dumps(frame, ensure_ascii=False, separators=(",", ":")))
 
     def _log_frame(self, frame: dict) -> None:
-        """帧级日志已移除（高频 JSON 序列化+写盘会拖垮引擎循环）；
-        仅保留指令错误提示。"""
         data = frame.get("data")
         if isinstance(data, dict) and data.get("t") == "resp":
             if data.get("error"):
@@ -591,8 +588,6 @@ class SocketV4Client:
         key = (sid, channel)
         frames = resolve_wave_frames(waveform, device_type)
         if waveform == PULSE_STREAM:
-            # 外部脉冲流：空表起步并标记脉冲通道（帧由模块推送追加，
-            # 未推送前波形循环不下发静默帧）
             self._pulse_keys.add(key)
             self._cycle(sid, channel).reset([])
             self._play_deadline.pop(key, None)
@@ -608,13 +603,6 @@ class SocketV4Client:
         self._log(f"{sid} 通道 {channel} 波形切换: {len(frames)} 帧 (持续循环)")
 
     async def push_pulse_frame(self, slot_id: str, channel: str, frame: str) -> None:
-        """外部脉冲流：模块推入的帧 (100ms) 作为**最新帧**刷新播放。
-
-        播放列表按「追加历史」语义会在同速推流下越积越长，波形循环的
-        播放指针越落越后（频率严重滞后）——故每推一帧即将播放列表替换
-        为该帧，波形循环补批取到的始终是最新频率（V4 批量供给粒度约为
-        一个补批周期）。首帧即时下发（immediate 冲掉切换前残留的旧
-        波形队列）。"""
         key = (slot_id, channel)
         cycle = self._cycle(slot_id, channel)
         first = not cycle.frames
@@ -645,8 +633,6 @@ class SocketV4Client:
 
     async def fire(self, slot_id: str | None = None, duration_s: float = 1.0,
                    value=None, channels=None) -> None:
-        """临时抬升强度开火（按通道）：``channels`` 缺省双通道，``value`` 为
-        开火强度（int = 全部通道共用，dict = 按通道）；None 时用通道上限。"""
         cid, sid = self._require_peer(slot_id)
         self._check_output_slot(sid)
         duration_ms = max(1, round(duration_s * 1000))
