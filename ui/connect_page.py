@@ -289,6 +289,12 @@ class ConnectPage(XamlClass, Page):
             else:
                 label = "未启用"
                 fg, bg = ("text3", "track")
+            # pill 签名缓存:内容不变不重建(此前每 tick 新建 XAML 对象,
+            # 心跳频率下是连接页卡顿的最大来源)
+            sig = (label, fg, bg)
+            if refs.get("pill_sig") == sig:
+                continue
+            refs["pill_sig"] = sig
             refs["pill_host"].Child = W.pill(label, fg, bg, dot_color=fg if fg != "text3" else None)
 
     def _update_pairing(self) -> None:
@@ -319,9 +325,13 @@ class ConnectPage(XamlClass, Page):
                 ids.append(f"本机 ID: {state.client_id}")
             if state.target_id:
                 ids.append(f"对端: {state.target_id}")
-            refs["ids"].Text = "\n".join(ids)
-            refs["status"].Text = (state.status_text
-                                   or ("等待扫码配对" if state.qr_text else "未连接"))
+            ids_text = "\n".join(ids)
+            if refs["ids"].Text != ids_text:
+                refs["ids"].Text = ids_text
+            status_text = (state.status_text
+                           or ("等待扫码配对" if state.qr_text else "未连接"))
+            if refs["status"].Text != status_text:
+                refs["status"].Text = status_text
             refs["pairing"].Visibility = Visibility.Visible
 
     def _update_devices(self) -> None:

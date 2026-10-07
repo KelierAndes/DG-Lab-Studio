@@ -13,8 +13,7 @@ import websockets
 
 from .monitor import WaveMonitor
 from .state import EngineState, Slot, StateEvents
-from .waves import (PULSE_STREAM, FrameCycle, resolve_wave_frames,
-                    trim_pulse_stream)
+from .waves import PULSE_STREAM, FrameCycle, resolve_wave_frames
 
 DEFAULT_V4_RELAY = "wss://trex.dungeon-lab.cn/v4"
 PING_INTERVAL = 2.0
@@ -303,22 +302,18 @@ class SocketV4Client:
     async def _send_raw(self, frame: dict) -> None:
         if self._ws is None:
             raise RuntimeError("WebSocket 未连接")
-        self._log_frame(">>", frame)
         await self._ws.send(json.dumps(frame, ensure_ascii=False, separators=(",", ":")))
 
-    def _log_frame(self, direction: str, frame: dict) -> None:
-        ftype = frame.get("type")
-        if ftype in ("ping", "pong", "heartbeat"):
-            return
+    def _log_frame(self, frame: dict) -> None:
+        """帧级日志已移除（高频 JSON 序列化+写盘会拖垮引擎循环）；
+        仅保留指令错误提示。"""
         data = frame.get("data")
         if isinstance(data, dict) and data.get("t") == "resp":
             if data.get("error"):
                 self.events.emit("log", f"[V4] 指令错误: {data.get('error')} req={data.get('reqId')}")
-                return
-        self.events.emit("frame_log", direction, frame)
 
     def _handle_frame(self, frame: dict) -> None:
-        self._log_frame("<<", frame)
+        self._log_frame(frame)
         ftype = frame.get("type")
         if ftype == "hello":
             self.state.client_id = str(frame.get("clientId", ""))
@@ -613,21 +608,20 @@ class SocketV4Client:
         self._log(f"{sid} 通道 {channel} 波形切换: {len(frames)} 帧 (持续循环)")
 
     async def push_pulse_frame(self, slot_id: str, channel: str, frame: str) -> None:
-        """外部脉冲流：模块推入的一帧 (100ms) 追加到该通道播放队列尾部。
+        """外部脉冲流：模块推入的帧 (100ms) 作为**最新帧**刷新播放。
 
-        波形循环按 0.6s 提前量从队列取帧下发，模块按 0.1s 节奏推送即
-        实时成流；超长从头裁剪。首帧即时下发（immediate 冲掉切换前
-        残留的旧波形队列）。"""
+        播放列表按「追加历史」语义会在同速推流下越积越长，波形循环的
+        播放指针越落越后（频率严重滞后）——故每推一帧即将播放列表替换
+        为该帧，波形循环补批取到的始终是最新频率（V4 批量供给粒度约为
+        一个补批周期）。首帧即时下发（immediate 冲掉切换前残留的旧
+        波形队列）。"""
         key = (slot_id, channel)
         cycle = self._cycle(slot_id, channel)
         first = not cycle.frames
-        cycle.frames.append(frame)
-        trim_pulse_stream(cycle.frames)
+        cycle.reset([frame])
         if first and self._active_client_id() is not None:
             try:
-                batch = [cycle.next_frame()
-                         for _ in range(min(WAVE_BATCH_FRAMES, len(cycle.frames)))]
-                await self._send_batch(slot_id, channel, batch, immediate=True)
+                await self._send_batch(slot_id, channel, [frame], immediate=True)
             except Exception as exc:
                 self._log(f"{slot_id}/{channel} 脉冲流首帧发送失败: {exc!r}")
 

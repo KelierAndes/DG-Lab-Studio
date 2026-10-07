@@ -13,9 +13,14 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 from dglab.waves import wave_order
+
+# 脉冲流推帧节流下限（秒）：设备按 100ms/帧消费，事件流周期再短也最多
+# 10 帧/秒，避免推入快于消费造成播放队列积压（延迟累积）
+PULSE_PUSH_MIN_INTERVAL_S = 0.1
 
 __all__ = [
     "core_inputs", "input_spec", "input_specs", "input_ranges",
@@ -23,7 +28,7 @@ __all__ = [
     "output_signals", "output_specs", "output_spec", "output_key",
     "label_of", "family_label", "build_dispatchers",
     "device_state_values", "core_aliases", "core_alias_values",
-    "OUTPUT_SIGNALS", "ACTION_OUTPUT",
+    "OUTPUT_SIGNALS", "ACTION_OUTPUT", "PULSE_PUSH_MIN_INTERVAL_S",
 ]
 
 _FAMILY_LABELS = {"COYOTE": "郊狼", "OVC": "负鼠", "BMTR": "灵猫"}
@@ -63,10 +68,6 @@ def core_inputs() -> list[dict[str, Any]]:
                           "label": f"{zh}通道 {ch} 波形步进", "type": "Int",
                           "range": (-1, 1), "action": "wave_step",
                           "desc": "非零触发 ±1 切换"})
-            specs.append({**base, "key": f"{prefix}zap_{low}",
-                          "label": f"{zh}通道 {ch} 瞬时脉冲", "type": "Bool",
-                          "range": (0, 1), "action": "zap",
-                          "desc": "非零触发 1 秒脉冲"})
         specs.append({"family": family, "channel": "", "group": f"{zh}通道",
                       "key": f"{prefix}fire", "label": f"{zh}开火",
                       "type": "Bool", "range": (0, 1), "action": "fire",
@@ -77,6 +78,11 @@ def core_inputs() -> list[dict[str, Any]]:
                           "label": f"{zh}开火 {ch}",
                           "type": "Bool", "range": (0, 1), "action": "fire",
                           "desc": "仅本通道起爆 / 归零停止并恢复"})
+            specs.append({**base_ch, "key": f"{prefix}pulse_{ch.lower()}",
+                          "label": f"{zh}通道 {ch} 脉冲流频率", "type": "Int",
+                          "range": (0, 1000), "action": "pulse",
+                          "desc": "数值推入：0=静音帧，10-1000=脉冲频率"
+                                  "（波形需选「外部脉冲流」，周期事件每拍推帧）"})
     specs.append({"family": "", "channel": "", "group": "全局",
                   "key": "in_emergency", "label": "急停（全部设备）",
                   "type": "Bool", "range": (0, 1), "action": "emergency",
@@ -283,13 +289,19 @@ def build_dispatchers(api, specs: list[dict] | None = None
     """核心输入参数 → 执行器 ``fn(value:int)``。
 
     ``api`` 由模块适配，需提供：``run(coro)``、``resolve_slot(family)``、
-    ``set_strength`` / ``set_wave`` / ``zap`` / ``fire_start`` / ``fire_stop`` /
-    ``emergency_stop`` / ``wave_order(family)`` / ``wave_selection()``。
+    ``set_strength`` / ``set_wave`` / ``fire_start`` / ``fire_stop`` /
+    ``push_pulse`` / ``emergency_stop`` / ``wave_order(family)`` /
+    ``wave_selection()``。
     """
     out: dict[str, Callable[[int], None]] = {}
     for spec in (core_inputs() if specs is None else specs):
         out[spec["key"]] = _dispatcher(spec, api)
     return out
+
+
+# 家族限定参数的派发目标哨兵：目标家族不在场时跳过本轮派发（不落到
+# 其他设备——适配层的跨家族兜底对显式家族目标不生效）
+_NO_TARGET = object()
 
 
 def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
@@ -299,10 +311,33 @@ def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
     edge = {"last": None}
 
     def slot():
+        """解析目标设备；家族限定参数做**严格家族校验**。
+
+        适配层可能带跨家族兜底（OSC 头像参数等场景）；核心参数 id 明确
+        带家族时以家族为准——兜底解析到其他家族视为未命中，跳过派发
+        （郊狼目标不再误触在场负鼠）。适配层未实现 slot_family 钩子时
+        维持旧行为（无法校验则接受解析结果）。
+        """
         try:
-            return api.resolve_slot(family)
+            sid = api.resolve_slot(family)
         except Exception:
             return None
+        if sid is not None and family:
+            fam_fn = getattr(api, "slot_family", None)
+            if callable(fam_fn):
+                try:
+                    if str(fam_fn(sid) or "").upper() != family.upper():
+                        return None
+                except Exception:
+                    pass
+        return sid
+
+    def target() -> str | None:
+        """家族限定参数的派发目标：家族不在场返回哨兵跳过本轮派发。"""
+        sid = slot()
+        if family and sid is None:
+            return _NO_TARGET
+        return sid
 
     def changed(value: int) -> bool:
         """0↔非零边沿判定：引擎重载 / 首轮求值的重复派发不再重复动作。"""
@@ -314,19 +349,28 @@ def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
 
     if action == "strength":
         def run(value: int) -> None:
+            sid = target()
+            if sid is _NO_TARGET:
+                return
             api.run(api.set_strength(channel, _clamp(value, 0, 200),
-                                     slot_id=slot()))
+                                     slot_id=sid))
         return run
 
     if action == "wave":
         def run(value: int) -> None:
+            sid = target()
+            if sid is _NO_TARGET:
+                return
             order = api.wave_order(family)
             idx = _clamp(value, 0, max(0, len(order) - 1))
-            api.run(api.set_wave(channel, order[idx], slot_id=slot()))
+            api.run(api.set_wave(channel, order[idx], slot_id=sid))
         return run
 
     if action == "wave_step":
         def run(value: int) -> None:
+            sid = target()
+            if sid is _NO_TARGET:
+                return
             step = _clamp(value, -1, 1)
             if step == 0:
                 return
@@ -335,13 +379,7 @@ def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
                           or order[0])
             idx = order.index(current) if current in order else 0
             name = order[(idx + (1 if step > 0 else -1)) % len(order)]
-            api.run(api.set_wave(channel, name, slot_id=slot()))
-        return run
-
-    if action == "zap":
-        def run(value: int) -> None:
-            if _truthy(value) and changed(value):
-                api.run(api.zap(channel, 1.0, slot_id=slot()))
+            api.run(api.set_wave(channel, name, slot_id=sid))
         return run
 
     if action == "fire":
@@ -351,11 +389,44 @@ def _dispatcher(spec: dict[str, Any], api) -> Callable[[int], None]:
         def run(value: int) -> None:
             if not changed(value):
                 return
-            sid = slot()
+            sid = target()
+            if sid is _NO_TARGET:
+                return
             if _truthy(value):
                 api.run(api.fire_start(slot_id=sid, channel=fire_channel))
             else:
                 api.run(api.fire_stop(slot_id=sid, channel=fire_channel))
+        return run
+
+    if action == "pulse":
+        # 脉冲流数值推入：每次派发推一帧（周期事件每拍触发，非边沿动作），
+        # 派发侧按 0.1s 节流防止周期短于帧时长造成队列积压；
+        # 0 = 静音帧（电平 0，保留波形成形），10-1000 = 脉冲频率。
+        # 电平默认 100；模块适配层提供 pulse_level(channel) 时跟随响度
+        # （设备振动/波形包络随音频起伏，波形图出现高低变化）
+        last_push = {"t": 0.0}
+
+        def run(value: int) -> None:
+            now = time.monotonic()
+            if now - last_push["t"] < PULSE_PUSH_MIN_INTERVAL_S:
+                return
+            last_push["t"] = now
+            sid = target()
+            if sid is _NO_TARGET:
+                return
+            freq = _clamp(value, 0, 1000)
+            if freq <= 0:
+                api.run(api.push_pulse(channel, 10, level=0, slot_id=sid))
+            else:
+                level_fn = getattr(api, "pulse_level", None)
+                level = 100
+                if callable(level_fn):
+                    try:
+                        level = max(0, min(100, int(level_fn(channel))))
+                    except Exception:
+                        level = 100
+                api.run(api.push_pulse(channel, max(10, freq), level=level,
+                                       slot_id=sid))
         return run
 
     if action == "emergency":

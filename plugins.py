@@ -21,11 +21,15 @@ import os
 import shutil
 import string
 import sys
+import time
 import traceback
 from typing import Any, Callable
 from concurrent.futures import Future
 
 from module_store import ModuleStore
+from dglab.expr import variables as expr_variables
+from dglab.mapping import as_number
+from dglab.params import input_specs
 
 
 def _base_dir() -> str:
@@ -104,6 +108,10 @@ class JsonDict(dict):
         self.save()
 
 
+# 残留目录自动清理标记：delete_module 删不净时写入，下次启动整目录清扫
+_CLEANUP_MARKER = ".dgstudio_pending_cleanup"
+
+
 def module_roots() -> list[str]:
     """模块扫描根列表：modules/ 与 exe 同级（打包后由 build_exe.py 复制到产物根）。"""
     roots: list[str] = [os.path.join(_base_dir(), "modules")]
@@ -168,6 +176,15 @@ class ModuleBase:
         可读参数是模块从核心读走并回传给对端的字段：META["reads"] 按
         「核心输出信号名 → {label, name, type}」声明，模块装载时据此为
         空输出表落地默认行，联动页输出表也以它们作字段名联想。
+        """
+        return []
+
+    def temp_specs(self) -> list[dict]:
+        """模块读写的临时变量声明 ``[{key, label, desc}]``（可选实现）。
+
+        联动页「临时变量」面板将其展示为模块维护行（实时值可引用）；
+        缺省实现取 META["temps"]。模块代码经 ``ctx.set_temp/get_temp``
+        读写，值空间与临时变量表表达式共享。
         """
         return []
 
@@ -300,6 +317,17 @@ class ModuleContext:
     def emergency_stop(self):
         return self.engine.emergency_stop()
 
+    # ---- 临时变量（声明见 META["temps"]；事件流在联动页配置，运算只在临时变量表） ----
+
+    def set_temp(self, key: str, value) -> None:
+        """写临时变量（数值化；与联动页临时变量表、事件流动作共享值空间，
+        写入即触发映射重算）。"""
+        self.engine.modules.set_temp(self.module_id, key, value)
+
+    def get_temp(self, key: str, default: float = 0.0) -> float:
+        """读临时变量（未写过返回 ``default``）。"""
+        return self.engine.modules.get_temp(self.module_id, key, default)
+
     # ---- 游戏模组（META["mods"] + mods/ 载荷；通用接口，携带模组的模块可用） ----
 
     def game_mods_dir(self) -> str | None:
@@ -337,6 +365,10 @@ class PluginManager:
         self._ctxs: dict[str, ModuleContext] = {}
         self._button_actions: dict[str, ButtonAction] = {}
         self._settings_cache: dict[str, JsonDict] = {}
+        # 每模块临时变量共享空间（模块 ctx 读写、映射引擎求值同源）
+        self._temps: dict[str, dict[str, float]] = {}
+        # 每模块事件流节拍任务（asyncio Future，卸载/停用时取消）
+        self._event_tasks: dict[str, Future] = {}
         # 模块配置目录：与主 config.json 同目录的 config/ 子目录
         main_dir = os.path.dirname(os.path.abspath(getattr(engine.config, "path",
                                                            _base_dir())))
@@ -540,7 +572,8 @@ class PluginManager:
     def settings_for(self, module_id: str) -> JsonDict:
         """模块私有设置（加载后缓存，写操作自动落盘 config/<stem>.json）。
 
-        装载时按模块声明（config_spec / META["config"]）自动补齐缺失项。
+        装载时按模块声明（config_spec / META["config"]）自动补齐缺失项，
+        并清除映射表时代的 mappings/outputs 遗留设置项（事件流是唯一数据面，不迁移）。
         """
         cached = self._settings_cache.get(module_id)
         if cached is not None:
@@ -548,8 +581,104 @@ class PluginManager:
         path = os.path.join(self.config_dir, f"{self._settings_stem(module_id)}.json")
         settings = JsonDict(path, _load_json_file(path))
         self._apply_spec_defaults(module_id, settings)
+        self._purge_legacy_tables(module_id, settings)
+        self._purge_stale_event_actions(module_id, settings)
         self._settings_cache[module_id] = settings
         return settings
+
+    def _purge_stale_event_actions(self, module_id: str, settings: JsonDict) -> None:
+        """清除事件动作里引用已下线核心参数的僵尸行（如已移除的瞬时脉冲）。
+
+        参数目录之外的输入动作在派发时只会报「派发失败」，留在配置里即是
+        死行：直接删除并记日志。输出动作的目标是输出信号，不在清洗范围。
+        """
+        events = [e for e in (settings.get("events") or [])
+                  if isinstance(e, dict)]
+        if not events:
+            return
+        valid = input_specs()
+        changed = False
+        for card in events:
+            actions = [a for a in (card.get("actions") or [])
+                       if isinstance(a, dict)]
+            kept = [a for a in actions
+                    if not (str(a.get("dir") or "in") == "in"
+                            and str(a.get("param") or "") not in valid)]
+            if len(kept) != len(actions):
+                changed = True
+                card["actions"] = kept
+        if changed:
+            settings["events"] = events
+            settings.save()
+            self.engine._log(
+                f"模块 {module_id} 事件流中引用已下线核心参数的动作已清除")
+
+    def _purge_legacy_tables(self, module_id: str, settings: JsonDict) -> None:
+        """清除映射表时代的 mappings/outputs 设置项（用户指示：不迁移）。
+
+        事件流是唯一数据面：遗留映射/输出设置**直接删除键**（不转换、
+        不保留空项；模块代码对缺失键按空表处理，兼容无忧），配置里确保
+        无此项。同时清掉早期自动迁移的产物（「输入映射（迁移）」卡片与
+        仅被其引用的 map_* 临时行——用户已在事件流重建行为，保留即重复
+        驱动的幽灵流）。非空内容被清除时记日志，空键静默删除。
+        """
+        mappings = [r for r in (settings.get("mappings") or [])
+                    if isinstance(r, dict)]
+        outputs = [r for r in (settings.get("outputs") or [])
+                   if isinstance(r, dict)]
+        temps = [r for r in (settings.get("temps") or []) if isinstance(r, dict)]
+        events = [r for r in (settings.get("events") or [])
+                  if isinstance(r, dict)]
+
+        stale = [e for e in events
+                 if str(e.get("name") or "") == "输入映射（迁移）"]
+        if stale:
+            events = [e for e in events
+                      if str(e.get("name") or "") != "输入映射（迁移）"]
+            candidates = {str(t.get("name") or "") for t in temps
+                          if str(t.get("name") or "").startswith("map_")}
+            referenced = set()
+            for e in events:
+                for a in (e.get("actions") or []):
+                    if isinstance(a, dict):
+                        referenced.add(str(a.get("var") or ""))
+                        referenced.add(str(a.get("param") or ""))
+                arg = e.get("arg")
+                if str(e.get("trigger")) == "change" and arg:
+                    referenced.add(str(arg))
+                if str(e.get("trigger")) == "if" and arg:
+                    referenced |= set(expr_variables(str(arg)))
+            for t in temps:
+                name = str(t.get("name") or "")
+                if name in candidates:
+                    continue          # 候选行本身不算引用(避免自保活)
+                if name:
+                    referenced.add(name)
+                referenced |= set(expr_variables(str(t.get("expr") or "")))
+            temps = [t for t in temps
+                     if str(t.get("name") or "") not in candidates
+                     or str(t.get("name") or "") in referenced]
+
+        dirty = "mappings" in settings or "outputs" in settings or bool(stale)
+        if not dirty:
+            return
+        settings.pop("mappings", None)
+        settings.pop("outputs", None)
+        if stale:
+            settings["temps"] = temps
+            settings["events"] = events
+        settings.save()
+        if mappings or outputs or stale:
+            parts = []
+            if mappings:
+                parts.append(f"清除遗留输入映射 {len(mappings)} 行")
+            if outputs:
+                parts.append(f"清除遗留输出映射 {len(outputs)} 行"
+                             "（回传字段请在事件流以「输出」动作重建）")
+            if stale:
+                parts.append(f"清理自动迁移产物 {len(stale)} 张卡片")
+            self.engine._log(f"模块 {module_id} 映射表时代设置项已清除："
+                             + "；".join(parts))
 
     def config_spec_for(self, module_id: str) -> dict:
         """模块配置项声明：实例 config_spec() 优先，其次 META["config"] 静态声明。"""
@@ -599,6 +728,8 @@ class PluginManager:
             settings = JsonDict(path, _load_json_file(path))
             if self._apply_spec_defaults(module_id, settings):
                 touched.append(module_id)
+            self._purge_legacy_tables(module_id, settings)
+            self._purge_stale_event_actions(module_id, settings)
             self._settings_cache[module_id] = settings
         return touched
 
@@ -676,6 +807,8 @@ class PluginManager:
                     "config": dict(meta.get("config") or {}),
                     "params": dict(meta.get("params") or {}),
                     "reads": dict(meta.get("reads") or {}),
+                    "temps": [dict(t) for t in (meta.get("temps") or [])
+                              if isinstance(t, dict)],
                     "mods": dict(meta.get("mods") or {}),
                     "dependencies": [str(d) for d in
                                      (meta.get("dependencies") or [])],
@@ -785,12 +918,19 @@ class PluginManager:
         self._ctxs[module_id] = ctx
         inst.on_load(ctx)
         self._instances[module_id] = inst
+        self._temps.pop(module_id, None)   # 全新装载 = 临时变量空间清零
         if module_id in self._meta:
             self._meta[module_id]["loaded"] = True
         self._register_actions(module_id, inst)
         self.engine._log(f"模块已加载: {inst.name or module_id} v{inst.version}")
         self.engine.events.emit("modules_changed", module_id)
         return inst
+
+    def _unregister_actions(self, module_id: str) -> None:
+        """注销该模块注册的全部按键动作（卸载与停用时调用）。"""
+        self._button_actions = {key: action for key, action
+                                in self._button_actions.items()
+                                if action.owner != module_id}
 
     def _register_actions(self, module_id: str, inst: ModuleBase) -> None:
         try:
@@ -800,12 +940,13 @@ class PluginManager:
                              f"{traceback.format_exc()}")
             return
         for action in actions:
-            if action.key in self._button_actions:
-                self.engine._log(f"模块 {module_id} 的按键动作 {action.key} "
-                                 f"已被模块 {self._button_actions[action.key].owner} "
-                                 f"注册，忽略重复项")
-                continue
             action.owner = module_id
+            existing = self._button_actions.get(action.key)
+            if existing is not None and existing.owner != module_id:
+                self.engine._log(f"模块 {module_id} 的按键动作 {action.key} "
+                                 f"已被模块 {existing.owner} 注册，忽略重复项")
+                continue
+            # 同模块重注册（停用→重启）静默覆盖，幂等
             self._button_actions[action.key] = action
 
     async def unload(self, module_id: str) -> None:
@@ -819,9 +960,9 @@ class PluginManager:
             self.engine._log(f"模块 {module_id} 卸载清理失败:\n{traceback.format_exc()}")
         self._instances.pop(module_id, None)
         self._ctxs.pop(module_id, None)
-        self._button_actions = {key: action for key, action
-                                in self._button_actions.items()
-                                if action.owner != module_id}
+        self._temps.pop(module_id, None)
+        self._cancel_event_stream(module_id)
+        self._unregister_actions(module_id)
         if module_id in self._meta:
             self._meta[module_id]["loaded"] = False
             self._meta[module_id]["running"] = False
@@ -833,9 +974,12 @@ class PluginManager:
 
     async def start(self, module_id: str) -> None:
         inst = self.load(module_id)
+        self._register_actions(module_id, inst)  # 停用期间注销过，幂等重注册
         await inst.start()
+        self.apply_logic_tables(module_id)
         if module_id in self._meta:
             self._meta[module_id]["running"] = inst.is_running()
+        self.engine.events.emit("modules_changed", module_id)
 
     async def stop(self, module_id: str) -> None:
         inst = self._instances.get(module_id)
@@ -844,6 +988,113 @@ class PluginManager:
         await self._stop_instance(inst)
         if module_id in self._meta:
             self._meta[module_id]["running"] = False
+
+    async def deactivate(self, module_id: str) -> None:
+        """停用（联动页开关关）：停止运行并记为关闭，不卸载实例。
+
+        与 uninstall（模块页显式卸载）的区别：实例与导入缓存保留，联动页
+        卡片仅折叠不移除，重开开关复用已加载实例秒启。按键动作随停止注销
+        （停止中的模块不再响应绑定），重新启动时在 start 里幂等重注册。
+        """
+        self._unregister_actions(module_id)
+        self.set_enabled(module_id, False)
+        self._cancel_event_stream(module_id)
+        await self.stop(module_id)
+        self.engine.events.emit("modules_changed", module_id)
+
+    # --------------------------------------------- 事件流与临时变量（宿主侧）
+
+    def _mapping_engine(self, module_id: str):
+        """模块的映射引擎（bridge.engine / server.engine），无则 None。"""
+        inst = self._instances.get(module_id)
+        runtime = getattr(inst, "bridge", None) or getattr(inst, "server", None)
+        return getattr(runtime, "engine", None) if runtime is not None else None
+
+    def temp_specs_for(self, module_id: str) -> list[dict]:
+        """临时变量声明：实例 temp_specs() 优先，其次 META["temps"]。"""
+        inst = self._instances.get(module_id)
+        if inst is not None:
+            try:
+                specs = inst.temp_specs()
+                if specs:
+                    return [dict(s) for s in specs if isinstance(s, dict)]
+            except Exception:
+                self.engine._log(f"模块 {module_id} temp_specs() 失败:\n"
+                                 f"{traceback.format_exc()}")
+        return [dict(s) for s in ((self._meta.get(module_id) or {})
+                                  .get("temps") or [])]
+
+    def temps_space(self, module_id: str) -> dict[str, float]:
+        """模块临时变量共享空间（引擎求值与模块 ctx 读写同源）。"""
+        return self._temps.setdefault(module_id, {})
+
+    def set_temp(self, module_id: str, key: str, value) -> None:
+        num = as_number(value)
+        if num is None:
+            return
+        self.temps_space(module_id)[str(key)] = num
+        eng = self._mapping_engine(module_id)
+        if eng is not None and getattr(eng, "temps", None) is not None:
+            eng.pump()          # 新数据 → 重算映射表（与 signal 同语义）
+
+    def get_temp(self, module_id: str, key: str, default: float = 0.0) -> float:
+        return float(self.temps_space(module_id).get(str(key), default))
+
+    def apply_logic_tables(self, module_id: str) -> None:
+        """把联动页配置的临时变量表/事件流卡片装载进模块映射引擎。
+
+        临时变量空间由宿主持有并注入引擎（attach_temps），模块 ctx 与
+        配置表达式读写同一份；事件流由宿主节拍循环驱动（每 50ms 一拍，
+        周期更新/变量变更/if 判断三种驱动事件）。模块 reload_config 后
+        需再次调用（reload）。
+        """
+        eng = self._mapping_engine(module_id)
+        if eng is None or not hasattr(eng, "attach_temps"):
+            return
+        cfg = self.settings_for(module_id)
+        eng.attach_temps(self.temps_space(module_id))
+        eng.set_temp_rows(cfg.get("temps"))
+        eng.set_event_cards(cfg.get("events"))
+        self._ensure_event_stream(module_id)
+
+    def _ensure_event_stream(self, module_id: str) -> None:
+        """启动模块的事件流节拍循环（已运行则跳过）。"""
+        if self._event_tasks.get(module_id) is not None:
+            return
+        eng = self._mapping_engine(module_id)
+        if eng is None or not hasattr(eng, "tick_event_cards") \
+                or not eng.has_events():
+            return
+        self._event_tasks[module_id] = self.engine.submit(
+            self._event_stream_loop(module_id))
+
+    def _cancel_event_stream(self, module_id: str) -> None:
+        task = self._event_tasks.pop(module_id, None)
+        if task is not None:
+            task.cancel()
+
+    async def _event_stream_loop(self, module_id: str) -> None:
+        """事件流节拍：每 50ms 驱动一次该模块的事件卡片（触发判定+动作）。"""
+        import time as _time
+        try:
+            while True:
+                await asyncio.sleep(0.05)
+                eng = self._mapping_engine(module_id)
+                if eng is None or not hasattr(eng, "tick_event_cards"):
+                    return
+                eng.tick_event_cards(_time.monotonic())
+        except asyncio.CancelledError:
+            pass
+
+    async def reload(self, module_id: str) -> None:
+        """重载运行中模块：原生 reload_config + 宿主逻辑表（temps/事件流）。"""
+        inst = self._instances.get(module_id)
+        if inst is None:
+            return
+        fn = getattr(inst, "reload_config", None)
+        if fn is not None:
+            await fn()
+        self.apply_logic_tables(module_id)
 
     async def _stop_instance(self, inst: ModuleBase) -> None:
         try:
@@ -882,9 +1133,12 @@ class PluginManager:
     def delete_module(self, module_id: str) -> None:
         """删除模块文件夹（含私有 _deps）。已加载的模块须先卸载。
 
-        Windows 下已 import 的扩展（.pyd/.dll）映像保留到进程退出，即时删除
-        会 WinError 5，而目录重命名不受映像锁影响：删除失败时把整个目录改名
-        <id>.pending_delete 摘出扫描，下次启动 discover 清扫（锁已释放）。
+        Windows 句柄实验结论（_tools/probe_file_lock*.py）：已载入扩展
+        （.pyd/.dll 映像锁）删不掉但**可改名**；普通打开句柄/数据内存映射
+        （杀软实时扫描等，瞬时为主）删不掉且**不可改名**，连整目录改名都
+        会被阻止。策略：短重试等瞬时占用释放 → 整目录改名摘出命名空间
+        （纯映像锁场景）→ 逐文件挽救可改名文件。残余文件打标记，下次
+        启动 _sweep_pending_deletes 清扫（锁已释放）。
         """
         if module_id in self._instances:
             raise RuntimeError(f"模块 {module_id} 正在运行，请先卸载")
@@ -895,29 +1149,94 @@ class PluginManager:
                 os.path.normcase(os.path.realpath(root))
                 for root in module_roots()):
             raise RuntimeError("拒绝删除模块根目录")
-        try:
-            shutil.rmtree(module_dir)
-        except OSError:
-            trash = module_dir + ".pending_delete"
-            shutil.rmtree(trash, ignore_errors=True)
+        last_exc: OSError | None = None
+        for attempt in range(3):
             try:
-                os.rename(module_dir, trash)
+                shutil.rmtree(module_dir)
+                last_exc = None
+                break
             except OSError as exc:
-                raise RuntimeError(
-                    f"模块 {module_id} 文件被占用且无法转移，请重启应用后重试"
-                ) from exc
-            self.engine._log(
-                f"模块 {module_id} 的部分文件被运行中的应用占用"
-                "（扩展 .pyd 载入后保留到进程退出），已标记重启后自动清理")
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.8)  # 杀软等瞬时占用：稍候重试
+        if last_exc is not None:
+            try:
+                os.rename(module_dir, module_dir + ".pending_delete")
+                last_exc = None
+                self.engine._log(
+                    f"模块 {module_id} 的部分文件被运行中的应用占用"
+                    "（已载入的扩展保留到进程退出），已整体移入 "
+                    ".pending_delete 隔离区，下次启动自动清理")
+            except OSError:
+                stuck = self._quarantine_locked_files(module_dir)
+                self.engine._log(
+                    f"模块 {module_id} 有文件被系统占用无法删除（{last_exc}），"
+                    f"{stuck} 个已挽救至隔离区，残余文件已标记下次启动自动清理")
+                self._mark_auto_cleanup(module_dir)
         self.discover()
         self.engine._log(f"模块文件已删除: {module_id}")
         self.engine.events.emit("modules_changed", module_id)
 
-    def _sweep_pending_deletes(self) -> None:
-        """清扫 <id>.pending_delete 删除残留（delete_module 被映像锁让位时留下）。
+    def _quarantine_locked_files(self, module_dir: str) -> int:
+        """删不净时的逐文件挽救：删得掉的删，删不掉但可改名的挪入隔离区。
 
-        调用时机为进程启动后首次 discover（上一进程的映像锁已释放），
-        ignore_errors 兜底杀软瞬时占用——删不净留待下次。
+        自底向上遍历（叶子先处理，目录清空后即可删除），返回连改名都
+        拒绝的文件数。隔离区为同级 <id>.pending_delete 目录（保持相对
+        结构），由 _sweep_pending_deletes 在下次启动时清扫。
+        """
+        trash = module_dir + ".pending_delete"
+        stuck = 0
+        for cur, dirs, names in os.walk(module_dir, topdown=False):
+            rel = os.path.relpath(cur, module_dir)
+            target_root = trash if rel == "." else os.path.join(trash, rel)
+            try:
+                os.makedirs(target_root, exist_ok=True)
+            except OSError:
+                stuck += len(names)
+                continue
+            for name in names:
+                src = os.path.join(cur, name)
+                try:
+                    os.remove(src)
+                    continue
+                except OSError:
+                    pass
+                dst = os.path.join(target_root, name)
+                serial = 0
+                while os.path.lexists(dst):
+                    serial += 1
+                    dst = os.path.join(target_root, f"{serial}_{name}")
+                try:
+                    os.rename(src, dst)
+                except OSError:
+                    stuck += 1
+            for name in dirs:
+                try:
+                    os.rmdir(os.path.join(cur, name))
+                except OSError:
+                    pass
+        try:
+            os.rmdir(module_dir)
+        except OSError:
+            pass
+        return stuck
+
+    def _mark_auto_cleanup(self, module_dir: str) -> None:
+        """在残留目录里写自动清理标记，供 _sweep_pending_deletes 识别。"""
+        try:
+            with open(os.path.join(module_dir, _CLEANUP_MARKER), "w",
+                      encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S"))
+        except OSError:
+            pass
+
+    def _sweep_pending_deletes(self) -> None:
+        """清扫删除残留（delete_module 让位/标记时留下）。
+
+        两类：整目录改名让位的 <id>.pending_delete，与写有
+        _CLEANUP_MARKER 的部分残留目录。调用时机为进程启动后首次
+        discover（上一进程的锁已释放），ignore_errors 兜底杀软瞬时
+        占用——删不净留待下次。
         """
         for root in module_roots():
             try:
@@ -925,9 +1244,20 @@ class PluginManager:
             except OSError:
                 continue
             for entry in entries:
+                path = os.path.join(root, entry)
                 if entry.endswith(".pending_delete"):
-                    shutil.rmtree(os.path.join(root, entry),
-                                  ignore_errors=True)
+                    shutil.rmtree(path, ignore_errors=True)
+                elif os.path.isdir(path) and os.path.isfile(
+                        os.path.join(path, _CLEANUP_MARKER)):
+                    shutil.rmtree(path, ignore_errors=True)
+                    if os.path.isdir(path):
+                        # 仍有占用残留：补回标记，下次启动继续清扫
+                        try:
+                            with open(os.path.join(path, _CLEANUP_MARKER),
+                                      "w", encoding="utf-8") as f:
+                                f.write(time.strftime("%Y-%m-%d %H:%M:%S"))
+                        except OSError:
+                            pass
 
     async def autostart(self) -> None:
         for module_id in list(self._paths):

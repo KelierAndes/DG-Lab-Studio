@@ -50,6 +50,7 @@ class CardView:
         self.led_combo = None
         self.chart_image = None
         self.hist_sig: tuple | None = None
+        self.wave_sig: tuple | None = None
         self.direct_a = None
         self.direct_b = None
         self.bindings: dict[int, object] = {}
@@ -1244,9 +1245,15 @@ class ControlPage(XamlClass, Page):
                 continue
             monitor = engine.wave_history(sid)
             samples = monitor.window(5.0) if monitor is not None else []
+            # 签名检测:波形数据没变化就跳过 PNG 渲染与图像写入
+            # (此前每 0.25s 无条件软渲染+跨 COM 流式写图,静默波形也在烧)
+            sig = (dark, hash(tuple(samples)))
+            if sig == view.wave_sig:
+                continue
             try:
                 png = charts.render_wave_live(samples, dark=dark)
                 self.shell.set_image_bytes(view.chart_image, png)
+                view.wave_sig = sig
             except Exception as exc:
                 self.shell.logs.append(f"波形图渲染失败: {exc!r}")
 

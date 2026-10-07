@@ -6,7 +6,8 @@
     ({StrengthA} - {LimitA}) * ({Hurt} / 100 + 1)
 
 约定：
-* 仅允许 + - * / // % ** 括号与数字、标识符、abs/min/max/round 函数；
+* 仅允许 + - * / // % ** 比较运算（> >= < <= == !=）括号与数字、标识符、
+  abs/min/max/round 函数；比较结果真 = 1 / 假 = 0；
 * 未定义变量按 0 处理（OSC/游戏数据到达前不报错）；
 * 除零 / 语法错误抛 ExprError，调用方跳过本轮即可；
 * 全角括号与运算符自动归一化，方便中文输入法下书写。
@@ -135,6 +136,29 @@ def _node(node: ast.AST, values: dict[str, float]) -> float:
                 raise ExprError("幂运算越界")
             return left ** right
         raise ExprError("不支持的运算符")
+    if isinstance(node, ast.Compare):
+        # 比较运算（事件分支条件用）：真 = 1.0 / 假 = 0.0，链式左结合
+        left = _node(node.left, values)
+        for op, comparator in zip(node.ops, node.comparators):
+            right = _node(comparator, values)
+            if isinstance(op, ast.Gt):
+                ok = left > right
+            elif isinstance(op, ast.GtE):
+                ok = left >= right
+            elif isinstance(op, ast.Lt):
+                ok = left < right
+            elif isinstance(op, ast.LtE):
+                ok = left <= right
+            elif isinstance(op, ast.Eq):
+                ok = left == right
+            elif isinstance(op, ast.NotEq):
+                ok = left != right
+            else:
+                raise ExprError("不支持的比较运算符")
+            if not ok:
+                return 0.0
+            left = right
+        return 1.0
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCS:
             raise ExprError("仅允许 abs/min/max/round 函数")

@@ -5,6 +5,7 @@ import threading
 import time
 from collections import deque
 
+from dglab import expr
 from dglab.official_waveforms import COYOTE_WAVEFORMS, CoyoteWaveform
 from dglab.official_waveforms_ovc import OVC_WAVEFORMS, OvcWaveform
 from dglab.state import EngineState, family_of
@@ -422,9 +423,13 @@ def stats(engine, log_buffer: LogBuffer) -> list[dict]:
 
 
 def module_data_sig(engine) -> tuple:
-    """联动模块数据签名（生命周期 + signals/out_values/errors 逐键值），供
-    页面 tick 在模块装卸启停或模块数据变化时触发重建（设备状态与日志签名
-    覆盖不到的部分；start/stop 不发 modules_changed 事件，靠本签名感知）。"""
+    """联动模块结构签名（生命周期 + signals/out_values 键集合）。
+
+    供仪表盘 tick 判断是否需要整页重建：模块装卸启停、或收到过的新参数
+    名/回传字段名集合变化才触发。**不含数值**——数值变化由数据值卡的
+    live 行更新覆盖，否则周期事件流（50ms 写 out_values）会造成高频
+    全页重建。start/stop 不发 modules_changed 事件，靠本签名感知。
+    """
     sig: list[tuple] = []
     try:
         for meta in engine.modules.list_modules():
@@ -434,11 +439,10 @@ def module_data_sig(engine) -> tuple:
         pass
     for module_id, _name, eng, _rt in module_engines(engine):
         try:
-            sig.append(("s", tuple(sorted(eng.signals.items()))))
-            sig.append(("o", tuple(sorted((str(k), repr(v))
-                                          for k, v in eng.out_values.items()))))
-            sig.append(("e", tuple(sorted(eng.errors.items()))))
-            sig.append(("E", tuple(sorted(eng.out_errors.items()))))
+            sig.append(("s", tuple(sorted(getattr(eng, "signals", {}) or {}))))
+            sig.append(("o", tuple(sorted(str(k)
+                                          for k in (getattr(eng, "out_values",
+                                                              {}) or {})))))
         except Exception:
             continue
     return tuple(sig)
@@ -540,17 +544,60 @@ def _input_value_text(value) -> str:
     return str(value)
 
 
-def input_value_rows(engine, state: EngineState) -> list[dict]:
-    """输入数据值：全部运行中模块收到的输入信号 + 灵猫传感器遥测。
+def _used_stream_vars(engine, module_id: str) -> set[str]:
+    """事件流已建立引用的变量集：动作 var/param、变更触发变量、
+    if 判断体与临时变量表达式中的 {变量}、临时变量名本身。
 
-    模块行来源为共享映射引擎的 ``signals``（OSC 头像参数、游戏 MOD 上报的
-    命名数值等），逐一标注来源模块。
+    主页参数监控据此过滤——模块收到的原始参数只有被数据流引用才上表，
+    未建立流的无名参数不再出现。
+    """
+    used: set[str] = set()
+    try:
+        cfg = engine.modules.settings_for(module_id)
+    except Exception:
+        return used
+    for card in (cfg.get("events") or []):
+        if not isinstance(card, dict):
+            continue
+        for act in (card.get("actions") or []):
+            if isinstance(act, dict):
+                if act.get("var"):
+                    used.add(str(act["var"]))
+                if act.get("param"):
+                    used.add(str(act["param"]))
+        trigger = str(card.get("trigger") or "")
+        arg = card.get("arg")
+        if trigger == "change" and arg:
+            used.add(str(arg))
+        if trigger == "if" and arg:
+            used |= set(expr.variables(str(arg)))
+    for row in (cfg.get("temps") or []):
+        if isinstance(row, dict):
+            if row.get("name"):
+                used.add(str(row["name"]))
+            used |= set(expr.variables(str(row.get("expr") or "")))
+    return used
+
+
+def input_value_rows(engine, state: EngineState) -> list[dict]:
+    """输入数据值：运行中模块被数据流引用的输入信号 + 临时变量 + 灵猫
+    传感器遥测。
+
+    模块收到的原始参数只有被事件流/临时变量引用才上表（未建立流的参数
+    不出现）；临时变量本身即已建立的流，全量显示。
     """
     rows: list[dict] = []
-    for _module_id, module_name, eng, _rt in module_engines(engine):
+    for module_id, module_name, eng, _rt in module_engines(engine):
+        used = _used_stream_vars(engine, module_id)
         for name in sorted(getattr(eng, "signals", {}) or {}):
+            if name not in used:
+                continue
             rows.append({"name": name, "kind": module_name,
                          "value": _input_value_text(eng.signals[name]),
+                         "age": "实时"})
+        for name in sorted(getattr(eng, "temps", {}) or {}):
+            rows.append({"name": name, "kind": f"{module_name} · 临时变量",
+                         "value": _input_value_text(eng.temps[name]),
                          "age": "实时"})
     for sid in sorted(getattr(state, "slots", {}) or {}):
         slot = state.slots[sid]

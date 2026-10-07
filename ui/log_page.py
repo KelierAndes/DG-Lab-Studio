@@ -35,7 +35,7 @@ class LogPage(XamlClass, Page):
         W.page_head(
             self.HeadHost,
             {"title": "日志",
-             "subtitle": "运行事件与通信数据帧记录，可按等级筛选",
+             "subtitle": "运行事件记录，可按等级筛选",
              "breadcrumb": ["控制台", "日志"]},
             actions=[
                 W.text_button("清空记录", symbol="Clear", accent=True,

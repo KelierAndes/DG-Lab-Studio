@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import os
 import sys
@@ -22,7 +23,8 @@ from dglab.socket_v4 import DEFAULT_V4_RELAY, SocketV4Client
 from dglab.state import EngineState, StateEvents, family_of
 from dglab.waves import (CONTINUOUS, COYOTE_WAVEFORMS, CoyoteWaveform,
                          PULSE_STREAM, SILENT, pulse_frame,
-                         resolve_wave_frames, wave_order)
+                         pulse_frame_vibration, resolve_wave_frames,
+                         wave_order)
 from plugins import PluginManager
 
 
@@ -61,7 +63,6 @@ class Config(dict):
         "relay": {"v4_port": 9998, "v3_port": 9999,
                   "v4_local": False, "v3_local": False},
         "device_settings": {},
-        "log_frames": True,
         "log_to_file": True,
         "auto_reconnect": True,
         "saved_devices": [],
@@ -135,13 +136,14 @@ class Engine:
             "B": SILENT,
         }
         self.events.on("log", self._file_only)
-        self.events.on("frame_log", lambda d, f: self.log_frame(d, f))
         self.modules = PluginManager(self)
         self._modules_ready = False
         self.events.on("modules_changed", self._on_module_change)
         self.events.on("ovc_button", self._on_ovc_button)
         self.events.on("ovc_button_up", self._on_ovc_button_up)
         self._fire_holds: dict[tuple[str, str], dict] = {}
+        # 脉冲流相位簿记：(slot, channel) → 上次推帧时刻（负鼠方波图案跨帧连续）
+        self._pulse_phase: dict[tuple[str, str], float] = {}
         self._migrate_ovc_profiles()
 
     def start(self) -> None:
@@ -156,6 +158,12 @@ class Engine:
         self.submit(self._startup_modules())
 
     def _run_loop(self) -> None:
+        if sys.platform == "win32":
+            # 引擎线程固定为 MTA 套间（COINIT_MULTITHREADED）：音频模块的
+            # PortAudio WASAPI 初始化会用 CoInitialize(NULL) 把线程改成 STA，
+            # bleak 在无消息泵的 STA 线程上蓝牙扫描/连接会直接报错。
+            # 返回 RPC_E_CHANGED_MODE 说明已是其他套间，此时不动。
+            ctypes.windll.ole32.CoInitializeEx(None, 0x0)
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self._loop_ready.set()
@@ -204,17 +212,6 @@ class Engine:
             self._file_log.info(msg)
         except Exception:
             pass
-
-    def log_frame(self, direction: str, frame: dict) -> None:
-        if not self.config.get("log_frames"):
-            return
-        try:
-            text = json.dumps(frame, ensure_ascii=False, separators=(",", ":"))
-        except Exception:
-            text = str(frame)
-        if len(text) > 300:
-            text = text[:300] + f"...(+{len(text) - 300})"
-        self._file_only(f"{direction} {text}")
 
     def get_state(self) -> EngineState:
         if self._backend is not None:
@@ -614,9 +611,12 @@ class Engine:
         """外部脉冲流：接收联动模块推入的频率数据（每 0.1s 一次）生成波形。
 
         模块以 0.1s 节奏调用（每帧 100ms），核心把「逻辑频率 (10-1000) +
-        电平 (0-100)」转成一帧脉冲追加到设备播放队列——替代内置波形发生器。
-        仅当该通道波形选中「外部脉冲流」时落地，其余情况静默丢弃（模块可
-        常推不息）；未连接设备同样忽略。V3 连接为尽力而为（整段窗口重发）。
+        电平 (0-100)」转成一帧脉冲，作为**最新帧**刷新设备播放——替代内置
+        波形发生器（追加历史会让循环播放指针越落越后，频率严重滞后）。
+        按设备家族构建：郊狼由设备按频率字节生成载波（电平=包络）；负鼠
+        振动无载波，频率合成进振幅方波图案（:func:`pulse_frame_vibration`，
+        相位跨帧连续）。仅当该通道波形选中「外部脉冲流」时落地，其余情况
+        静默丢弃（模块可常推不息）；未连接设备同样忽略。V3 为尽力而为。
         """
         backend = self._backend
         if backend is None:
@@ -629,7 +629,17 @@ class Engine:
         sid = self.resolve_slot(slot_id, output_only=True)
         if sid is None:
             return
-        await push(sid, channel, pulse_frame(frequency, level))
+        now = time.monotonic()
+        key = (sid, channel)
+        t_prev = self._pulse_phase.get(key, now)
+        self._pulse_phase[key] = now
+        slot = self.get_state().slots.get(sid)
+        family = family_of(slot.type) if slot is not None else "COYOTE"
+        if family == "OVC":
+            frame = pulse_frame_vibration(frequency, level, t_prev)
+        else:
+            frame = pulse_frame(frequency, level)
+        await push(sid, channel, frame)
 
     async def reset_strength(self, channel: str, slot_id: str | None = None) -> None:
         backend = self._require_backend()

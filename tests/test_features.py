@@ -867,14 +867,20 @@ class SavedDeviceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FrameLogTests(unittest.IsolatedAsyncioTestCase):
-    async def test_v4_emits_frame_log(self):
+    async def test_v4_no_frame_log_but_error_reported(self):
+        # 帧级日志已移除(高频写盘卡顿);指令错误仍以运行日志提示
         client = SocketV4Client(events=StateEvents())
-        frames: list[tuple[str, dict]] = []
-        client.events.on("frame_log", lambda d, f: frames.append((d, f)))
+        logs: list[str] = []
+        client.events.on("log", logs.append)
         client._handle_frame({"type": "hello", "clientId": "ctrl"})
-        client._handle_frame({"type": "ping"})
-        self.assertEqual([d for d, _f in frames], ["<<"])
-        self.assertEqual(frames[0][1]["type"], "hello")
+        client._handle_frame({"type": "message",
+                              "data": {"t": "resp", "strength": 20}})
+        self.assertEqual(logs, [])            # 正常帧不产生任何日志
+        client._handle_frame({"type": "message",
+                              "data": {"t": "resp", "error": "bad req",
+                                       "reqId": 7}})
+        self.assertEqual(len(logs), 1)
+        self.assertIn("bad req", logs[0])
 
 
 class WaveMonitorThreadTests(unittest.TestCase):
@@ -1140,17 +1146,12 @@ class DeviceSettingTests(unittest.IsolatedAsyncioTestCase):
         finally:
             engine.stop()
 
-    async def test_log_frame_goes_to_file_only(self):
+    async def test_frame_logging_removed(self):
+        # log_frame 接口与 frame_log 事件不复存在(用户指示:不记录帧信息)
         engine = self._engine()
         try:
-            seen: list[str] = []
-            engine.events.on("log", seen.append)
-            engine.config["log_frames"] = True
-            engine.log_frame(">>", {"type": "message", "data": {"t": 3}})
-            self.assertEqual(seen, [])
-            engine.config["log_frames"] = False
-            engine.log_frame(">>", {"type": "ping"})
-            self.assertEqual(seen, [])
+            self.assertFalse(hasattr(engine, "log_frame"))
+            self.assertEqual(engine.config.get("log_frames"), None)
         finally:
             engine.stop()
 

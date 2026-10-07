@@ -11,11 +11,14 @@ from dglab.params import core_inputs, output_spec
 # 输入参数的默认头像参数名模板：家族 → (参数后缀模板, 全局前缀名)。
 # fire 模板带 {ch}：家族级开火通道为空串（原名不变），通道开火得到
 # FireA/FireB 后缀，避免与双通道 fire 的默认参数名冲突。
+# 索引即 action 序号：strength=0 wave=1 wave_step=2 zap=3 fire=4 pulse=5
 INPUT_NAME_TEMPLATES = {
     "COYOTE": ("{prefix}Strength{ch}", "{prefix}Wave{ch}",
-               "{prefix}WaveStep{ch}", "{prefix}Zap{ch}", "{prefix}Fire{ch}"),
+               "{prefix}WaveStep{ch}", "{prefix}Zap{ch}", "{prefix}Fire{ch}",
+               "{prefix}Pulse{ch}"),
     "OVC": ("{prefix}InStrength{ch}", "{prefix}InWave{ch}",
-            "{prefix}InWaveStep{ch}", "{prefix}InZap{ch}", "{prefix}InFire{ch}"),
+            "{prefix}InWaveStep{ch}", "{prefix}InZap{ch}", "{prefix}InFire{ch}",
+            "{prefix}InPulse{ch}"),
 }
 
 
@@ -30,7 +33,7 @@ def default_input_name(config: dict, param_key: str) -> str:
             return f"{global_prefix}Emergency"
         templates = INPUT_NAME_TEMPLATES.get(str(spec["family"]), ())
         index = {"strength": 0, "wave": 1, "wave_step": 2, "zap": 3,
-                 "fire": 4}.get(str(spec["action"]))
+                 "fire": 4, "pulse": 5}.get(str(spec["action"]))
         if index is None or index >= len(templates):
             return str(spec["key"])
         prefix = str(prefixes.get(str(spec["family"]))

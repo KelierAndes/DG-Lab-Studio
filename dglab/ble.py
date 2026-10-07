@@ -16,7 +16,6 @@ from .waves import (
     frequency_to_xy,
     ovc_channel_pattern,
     resolve_wave_frames,
-    trim_pulse_stream,
     wire_to_logical_freq,
 )
 
@@ -596,19 +595,19 @@ class BleClient:
                      if waveform == PULSE_STREAM else ""))
 
     async def push_pulse_frame(self, slot_id: str, channel: str, frame: str) -> None:
-        """外部脉冲流：模块推入的一帧 (100ms) 追加到该通道播放队列尾部。
+        """外部脉冲流：模块推入的帧 (100ms) 作为**最新帧**刷新播放。
 
-        仅在引擎选中脉冲流波形时被调用；设备按 100ms/帧消费，模块按
-        0.1s 节奏推送即实时成流。超长从头裁剪，未知设备 / 灵猫静默忽略。
+        推送节奏与设备消费同速（10 帧/秒），循环若按「追加历史」语义
+        积压，播放指针会越落越后（频率严重滞后）——故每推一帧即将播放
+        列表替换为该帧：设备下一拍起播最新频率，实时跟随；未推流期间
+        循环最后一帧（保持最后频率）。未知设备 / 灵猫静默忽略。
         """
         session = self.sessions.get(slot_id)
         if session is None or session.kind == "bmtr":
             return
         if channel not in session._cycles:
             return
-        frames = session._cycles[channel].frames
-        frames.append(frame)
-        trim_pulse_stream(frames)
+        session._cycles[channel].reset([frame])
 
     async def clear_wave(self, channel: str | None = None, slot_id: str | None = None) -> None:
         sessions = [self.sessions[slot_id]] if slot_id and slot_id in self.sessions \

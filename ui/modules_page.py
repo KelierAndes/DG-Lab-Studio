@@ -109,8 +109,9 @@ class ModulesPage(XamlClass, Page):
         host.Children.Append(self._hint_card(
             "开发自己的模块",
             "模块是 modules/<id>/plugin.py 中的一个 ModuleBase 子类，可获得强度参数、"
-            "波形、开火、急停等公开 API。接口说明与示例见 dgstudio-modules-market 仓库的"
-            "开发文档，模块依赖由 META[\"dependencies\"] 声明、安装时自动补装。",
+            "波形、开火、急停、临时变量（ctx.set_temp/get_temp，META[\"temps\"] 声明"
+            "展示为模块维护行）等公开 API。接口说明与示例见 dgstudio-modules-market "
+            "仓库的开发文档，模块依赖由 META[\"dependencies\"] 声明、安装时自动补装。",
             link_label="dgstudio-modules-market · 模块开发文档（EXTENSIONS.md）"))
         return host
 
@@ -426,13 +427,18 @@ class ModulesPage(XamlClass, Page):
                 f"之后可随时从「在线模块」重新下载。", primary="删除")
             if not ok:
                 return
-            try:
-                self.shell.engine.modules.delete_module(module_id)
-            except Exception as exc:
-                self.shell.logs.append(f"删除模块失败: {exc}")
-                return
-            self.shell.logs.append(f"已删除模块文件: {module_id}")
-            self.rebuild()
+
+            def worker() -> None:
+                try:
+                    self.shell.engine.modules.delete_module(module_id)
+                except Exception as exc:
+                    self.shell.ui_queue.put(
+                        lambda: self.shell.logs.append(f"删除模块失败: {exc}"))
+                    return
+                self.shell.ui_queue.put(self.rebuild)
+
+            # 删除含短重试（等待杀软等瞬时占用释放），后台执行避免卡界面
+            threading.Thread(target=worker, daemon=True).start()
 
         asyncui.create_task(_confirm_delete())
 

@@ -14,9 +14,10 @@ from ui import live
 
 def _engine_with_module(signals=None, out_values=None, errors=None,
                         out_errors=None, mappings=1, outputs=1,
-                        last_rx=None):
+                        last_rx=None, cfg=None, temps=None):
     eng = MappingEngine(lambda key, value: None)
     eng.signals.update(signals or {})
+    eng.temps.update(temps or {})
     eng.out_values.update(out_values or {})
     eng.errors.update(errors or {})
     eng.out_errors.update(out_errors or {})
@@ -28,7 +29,8 @@ def _engine_with_module(signals=None, out_values=None, errors=None,
     host = SimpleNamespace(modules=SimpleNamespace(
         list_modules=lambda: [{"id": "alice_cradle",
                                "name": "Alice in Cradle 联动"}],
-        instance=lambda mid: inst))
+        instance=lambda mid: inst,
+        settings_for=lambda mid: cfg or {}))
     return SimpleNamespace(modules=host.modules, osc=None), server
 
 
@@ -189,12 +191,20 @@ class ModuleStateRowTests(unittest.TestCase):
 
 class ModuleValueRowTests(unittest.TestCase):
     def test_input_values_from_all_modules(self):
-        engine, _rt = _engine_with_module(signals={"HP": 60.5, "Orgasming": 1.0})
+        # 只显示被事件流/临时变量引用的参数,未引用的原始参数不上表
+        cfg = {"temps": [{"name": "HLost", "expr": "{HPmax} - {HP}"}],
+               "events": [{"name": "拍", "trigger": "if",
+                           "arg": "Orgasming", "actions": []}]}
+        engine, _rt = _engine_with_module(
+            signals={"HP": 60.5, "Heal": 2.0, "Orgasming": 1.0},
+            temps={"HLost": 40.0}, cfg=cfg)
         rows = live.input_value_rows(engine, None)
         by_name = {r["name"]: r for r in rows}
         self.assertEqual(by_name["HP"]["kind"], "Alice in Cradle 联动")
         self.assertEqual(by_name["HP"]["value"], "60.5")
         self.assertEqual(by_name["Orgasming"]["value"], "1")
+        self.assertNotIn("Heal", by_name)
+        self.assertEqual(by_name["HLost"]["kind"], "Alice in Cradle 联动 · 临时变量")
 
     def test_module_output_values(self):
         engine, _rt = _engine_with_module(out_values={"out0": 12, "b": True})

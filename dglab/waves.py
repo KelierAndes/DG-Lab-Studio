@@ -10,9 +10,7 @@ __all__ = [
     "SILENT",
     "SILENT_FRAMES",
     "PULSE_STREAM",
-    "PULSE_STREAM_MAX_FRAMES",
     "pulse_frame",
-    "trim_pulse_stream",
     "COYOTE_WAVEFORMS",
     "CoyoteWaveform",
     "OVC_WAVEFORMS",
@@ -139,10 +137,10 @@ def resolve_wave_frames(waveform: "CoyoteWaveform | OvcWaveform | str | list[str
 CONTINUOUS = "__CONTINUOUS__"
 SILENT = "__SILENT__"
 # 外部脉冲流：波形不由内置发生器产生，而由联动模块按 0.1s 节奏推送频率数据
-# （每帧 100ms），核心只负责把推入的帧按序播放。选中时后端循环从空表起步，
-# 随推送逐帧追加（超长从头裁剪），模块停推即以最后一段循环。
+# （每帧 100ms）。推流采用「最新帧替换」语义：每推一帧，播放列表即替换为
+# 该帧——推送与消费同速时「追加历史」会让播放指针越落越后（频率严重滞后）；
+# 模块停推即以最后一帧循环（保持最后频率）。
 PULSE_STREAM = "__PULSE_STREAM__"
-PULSE_STREAM_MAX_FRAMES = 200
 CONTINUOUS_FRAMES = [build_frame([40, 40, 40, 40], [100, 100, 100, 100])]
 SILENT_FRAMES = [build_frame([10, 10, 10, 10], [0, 0, 0, 0])]
 
@@ -151,17 +149,30 @@ def pulse_frame(frequency: int, level: int = 100) -> str:
     """逻辑频率 (10-1000) + 电平 (0-100) → 一帧 100ms 脉冲（四段同值）。
 
     联动模块经 ``ctx.push_pulse_stream`` 推流时由引擎逐次构建；
-    电平 0 即该帧静音（波形成形仍保留频率）。
+    电平 0 即该帧静音（波形成形仍保留频率）。郊狼由设备按频率字节
+    生成载波；负鼠（振动）无载波语义，须用 :func:`pulse_frame_vibration`。
     """
     wire = logical_to_wire_freq(frequency)
     amp = max(0, min(100, int(level)))
     return build_frame([wire] * 4, [amp] * 4)
 
 
-def trim_pulse_stream(frames: list[str]) -> None:
-    """把脉冲流播放队列裁剪到上限内（从头丢弃最旧帧，原地修改）。"""
-    while len(frames) > PULSE_STREAM_MAX_FRAMES:
-        frames.pop(0)
+def pulse_frame_vibration(frequency: int, level: int, t_start: float) -> str:
+    """负鼠（振动）脉冲帧：把频率渲染成**振幅方波图案**（相位跨帧连续）。
+
+    振动设备没有频率载波——只按图案振幅振动，若四段恒为满幅则输出是
+    一条恒定直线。故把「频率」显式合成进图案：振动速率 = 频率/100
+    （逻辑 10-1000 → 0.1-10 Hz 通断振动），通相振幅 = level、断相 = 0；
+    相位取绝对时间，跨帧连续（图案在帧间滚动而非每帧重置）。
+    """
+    rate = max(0.1, min(20.0, float(frequency) / 100.0))
+    amp = max(0, min(100, int(level)))
+    segs = []
+    for j in range(4):
+        t = t_start + j * 0.025
+        segs.append(amp if ((t * rate) % 1.0) < 0.5 else 0)
+    wire = logical_to_wire_freq(frequency)
+    return build_frame([wire] * 4, segs)
 
 
 def wave_order(family: str = "COYOTE") -> list[str]:

@@ -146,11 +146,11 @@ def _run_selftest() -> None:
                 link = win._page("link")
                 REPORT["link_cards"] = list(link._card_modules)
                 from ui.link_page import HIDDEN_MODULES
-                enabled_cards = [meta["id"]
-                                 for meta in win.engine.modules.list_modules()
-                                 if meta["id"] not in HIDDEN_MODULES
-                                 and meta["enabled"] and meta["config"]]
-                REPORT["link_cards_ok"] = (link._card_modules == enabled_cards)
+                card_ids = [meta["id"]
+                            for meta in win.engine.modules.list_modules()
+                            if meta["id"] not in HIDDEN_MODULES
+                            and meta["config"]]  # 已停用模块卡片也保留
+                REPORT["link_cards_ok"] = (link._card_modules == card_ids)
 
                 before = str(win.RootGrid.RequestedTheme)
                 win.toggle_theme()

@@ -67,8 +67,6 @@ class SocketV3Client:
             raise RuntimeError("WebSocket 未连接")
         payload.setdefault("clientId", self.state.client_id)
         payload.setdefault("targetId", self.state.target_id)
-        if payload.get("type") not in ("ping", "pong", "heartbeat"):
-            self.events.emit("frame_log", ">>", payload)
         await self._ws.send(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
     async def connect(self) -> None:
@@ -135,8 +133,6 @@ class SocketV3Client:
                 self._publish()
 
     def _handle_frame(self, frame: dict) -> None:
-        if frame.get("type") not in ("ping", "pong", "heartbeat"):
-            self.events.emit("frame_log", "<<", frame)
         ftype = frame.get("type")
         client_id = frame.get("clientId")
         target_id = frame.get("targetId")

@@ -13,7 +13,7 @@ APP_DIR = ROOT / "dist" / "DGStudio"
 RUNTIME_FILES = ("config.json", "dgstudio.log")
 RUNTIME_DIRS = ("config",)
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 # 分发 zip 的顶层保留项：运行时用户数据（config.json / config/ / 日志）与
 # 下载的联动模块一律不入包——首次运行自动生成配置，联动模块从「模块」页

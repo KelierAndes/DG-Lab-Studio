@@ -12,26 +12,29 @@ from win32more.Microsoft.UI.Xaml.Controls import (MenuFlyout, MenuFlyoutItem,
 from win32more.Microsoft.UI.Xaml.Media import VisualTreeHelper
 from win32more.winui3 import XamlClass
 
-from dglab.naming import default_input_name, default_output_name, device_osc_names
+from dglab import expr
+from dglab.mapping import bool_value
+from dglab.naming import device_osc_names
 from dglab.parsing import parse_name, parse_rect
-from dglab.params import core_inputs, label_of, output_spec, output_specs
+from dglab.params import core_inputs, output_specs
 from ui import theme, widgets as W
 from ui.paths import xaml
 from ui.region_pick import pick_crop, pick_region
 
 # 大卡片按「联动模块」分类：每张模块卡片共用统一模板
-# （输出映射表 → 输入映射表 → 模块设置），条目由模块配置声明自动生成。
+# （实时数据 → 事件流 → 临时变量 → 模块设置）。数据处理为事件流推送：
+# 事件小卡片 = 驱动事件（周期更新 / 变量变更时 / if 判断）+ 动作直列
+# （输入 核心参数 ← 变量 / 输出 核心信号 → 变量），动作不做运算，
+# 运算只属于临时变量表；四个区域均可折叠——模块运行中展开，已停用的
+# 模块卡片保留在本页并整体折叠（开关重开即恢复，不从联动页移除）。
 HIDDEN_MODULES = {"config_init"}
 
-# 输入表（通用模块）：核心参数（名称固定）| 表达式 | 实时值 | 操作
-_IN_COLS = (W.fixed(210), W.star(1.5), W.fixed(66), W.auto())
-_IN_HEAD = ("核心输入参数（名称固定）", "表达式（{变量} 四则运算）", "实时值", "")
-# 输入表（OSC）：核心参数 | 参数名（可自定义）| 表达式 | 实时值 | 操作
-_IN_OSC_COLS = (W.fixed(200), W.fixed(160), W.star(1.3), W.fixed(66), W.auto())
-_IN_OSC_HEAD = ("核心输入参数（名称固定）", "参数名（可自定义）", "表达式", "实时值", "")
-# 输出表：核心来源参数 | 参数名（可改）| 表达式 | 实时值 | 操作
-_OUT_COLS = (W.fixed(190), W.fixed(170), W.star(1.4), W.fixed(66), W.auto())
-_OUT_HEAD = ("核心来源参数（固定）", "参数名（可重命名）", "表达式", "实时值", "")
+# 临时变量表：变量名 | 表达式 | 实时值 | 操作
+_TEMP_COLS = (W.fixed(340), W.star(1.2), W.fixed(66), W.auto())
+_TEMP_HEAD = ("变量名", "表达式（空 = 模块维护）", "实时值", "")
+# 事件动作行：方向 | 核心参数 | 流向 | 变量 | 实时值 | 操作
+_ACTION_COLS = (W.fixed(44), W.star(1.1), W.fixed(26), W.star(1),
+                W.fixed(64), W.auto())
 
 _GAP = Thickness(12, 0, 0, 0)
 _BTN_GAP = Thickness(4, 0, 0, 0)
@@ -131,6 +134,8 @@ class LinkPage(XamlClass, Page):
         self._live_in: list[tuple] = []
         self._live_out: list[tuple] = []
         self._live_signals: list[tuple] = []
+        self._live_temps: list[tuple] = []
+        self._live_event: list[tuple] = []
         self._core_choices: list[tuple[str, str]] = []
         self._core_index: dict[str, int] = {}
         self._card_modules: list[str] = []
@@ -158,8 +163,9 @@ class LinkPage(XamlClass, Page):
                 self.HeadHost,
                 {"title": "联动",
                  "subtitle": "大卡片按联动模块分类，每张卡片共用统一模板"
-                             "（输出映射表 / 输入映射表 / 模块设置）；"
-                             "核心参数名固定不可改，模块侧字段名可重命名，表达式双向可用",
+                             "（实时数据 / 事件流 / 临时变量 / 模块设置）；"
+                             "事件流推送驱动：驱动事件触发动作直列，"
+                             "运算只写在临时变量表",
                  "breadcrumb": ["控制台", "联动"]},
                 actions=[
                     W.text_button("保存设置", symbol="Save", accent=True,
@@ -176,14 +182,15 @@ class LinkPage(XamlClass, Page):
             self._live_in = []
             self._live_out = []
             self._live_signals = []
+            self._live_temps = []
+            self._live_event = []
 
             content = W.stack(spacing=12, h="stretch")
             self._card_modules = []
             for meta in self.shell.engine.modules.list_modules():
                 if meta["id"] in HIDDEN_MODULES or not meta["config"]:
                     continue
-                if not meta["enabled"]:
-                    continue
+                # 已停用模块的卡片保留（折叠展示），开关重新打开即恢复
                 self._card_modules.append(meta["id"])
                 content.Children.Append(self._module_card(meta))
             if not self._card_modules:
@@ -202,10 +209,9 @@ class LinkPage(XamlClass, Page):
         self.shell.engine.save_config()
         modules = self.shell.engine.modules
         for meta in modules.list_modules():
-            inst = modules.instance(meta["id"])
-            reload = getattr(inst, "reload_config", None)
-            if reload is not None:
-                self.shell.submit(reload())
+            if modules.instance(meta["id"]) is not None:
+                # 原生 reload_config + 宿主逻辑表（临时变量/事件流）
+                self.shell.submit(modules.reload(meta["id"]))
         self.shell.logs.append("设置已保存，运行中模块的映射表已重载")
 
     # ------------------------------------------------------------ 卡片模板
@@ -226,9 +232,16 @@ class LinkPage(XamlClass, Page):
         return W.card(inner)
 
     def _block(self, caption: str, cols, head_names, rows, *,
-               note: str = "", tail_button: bool = False) -> object:
+               note: str = "", tail_button: bool = False,
+               expanded: bool = True) -> object:
+        # caption 形如「标题（使用说明）」：标题进折叠头，说明留在展开区
+        split = caption.find("（")
+        title = caption if split < 0 else caption[:split]
+        detail = "" if split < 0 else caption[split:]
         inner = W.stack(spacing=8, h="stretch")
-        inner.Children.Append(W.text(caption, size=11, bold=W.SEMIBOLD, color="text3"))
+        if detail:
+            inner.Children.Append(W.text(detail, size=11, color="text3",
+                                         wrap=True))
         inner.Children.Append(self._head_row(cols, head_names, tail_button))
         inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
         body = W.stack(spacing=0)
@@ -239,7 +252,8 @@ class LinkPage(XamlClass, Page):
         inner.Children.Append(body)
         if note:
             inner.Children.Append(W.text(note, size=11, color="text3", wrap=True))
-        return W.panel(inner, padding=14)
+        return W.panel(W.collapsible(title, inner, expanded=expanded),
+                       padding=14)
 
     def _row(self, cols, elems, *, height: float = _ROW_H) -> object:
         g = W.grid(*cols)
@@ -347,7 +361,8 @@ class LinkPage(XamlClass, Page):
             if bool(_t.IsOn):
                 self.shell.submit(self.shell.engine.modules.install(_mid))
             else:
-                self.shell.submit(self.shell.engine.modules.uninstall(_mid))
+                # 停用不卸载：实例与导入缓存保留，卡片折叠保留在本页
+                self.shell.submit(self.shell.engine.modules.deactivate(_mid))
 
         toggle.Toggled += _changed
         trailing = W.stack(horizontal=True, spacing=10, v="center")
@@ -390,24 +405,66 @@ class LinkPage(XamlClass, Page):
             engine = engines.setdefault(module_id, self._engine(module_id))
             value = engine.signals.get(name) if engine is not None else None
             tb.Text = _fmtv(value)
+        for tb, module_id, name in self._live_temps:
+            # 临时变量真源在宿主（attach 后与引擎共享），停用模块仍可显示
+            value = self.shell.engine.modules.temps_space(module_id).get(name)
+            tb.Text = _fmtv(value)
+        vals_cache: dict[str, dict] = {}
+        for tb, module_id, spec in self._live_event:
+            vals = vals_cache.setdefault(module_id, self._event_values(module_id))
+            if spec.get("kind") == "var":
+                tb.Text = _fmtv(vals.get(str(spec.get("name") or "")))
+                continue
+            try:                                   # if 判断体：实时真假
+                truth = bool_value(expr.evaluate(
+                    expr.normalize(str(spec.get("cond") or "")), vals))
+                tb.Text = "真" if truth else "假"
+            except expr.ExprError:
+                tb.Text = "—"
+
+    def _event_values(self, module_id: str) -> dict:
+        """事件流可视化的值空间：引擎值空间（设备变量∪信号∪临时变量），
+        无引擎时退回宿主临时变量空间。"""
+        eng = self._engine(module_id)
+        if eng is not None:
+            try:
+                return eng.values()
+            except Exception:
+                pass
+        return self.shell.engine.modules.temps_space(module_id)
 
     # ------------------------------------------------------- 统一模块卡片
 
     def _module_card(self, meta: dict) -> object:
         module_id = meta["id"]
-        spec = self.shell.engine.modules.config_spec_for(module_id)
-        cfg = self.shell.engine.modules.settings_for(module_id)
+        modules = self.shell.engine.modules
+        spec = modules.config_spec_for(module_id)
+        cfg = modules.settings_for(module_id)
         varpool = self._var_pool(module_id)
-        # 输出映射表仅对声明了 outputs 的模块渲染——纯输入模块（无回传
-        # 通道）不显示空表与添加入口，避免误导
-        has_outputs = "outputs" in spec
-        blocks = [self._realtime_block(module_id, cfg)]
-        if has_outputs:
-            blocks.append(self._output_block(module_id, cfg, varpool))
-        blocks.append(self._input_block(module_id, cfg, varpool))
+        # 事件流面板可选显示：模块有映射引擎（可执行动作）或已配置事件卡片
+        has_events = bool([e for e in (cfg.get("events") or [])
+                           if isinstance(e, dict)]) \
+            or self._engine(module_id) is not None
+        # 临时变量面板：有映射引擎（表达式可被求值）或模块声明了 temps
+        # （META["temps"] / temp_specs）或已有配置行——三者其一即显示；
+        # 模块不声明也能用（有引擎即可添加行），声明行仅作模块维护展示
+        has_temps = self._engine(module_id) is not None \
+            or bool(modules.temp_specs_for(module_id)) \
+            or bool([r for r in (cfg.get("temps") or [])
+                     if isinstance(r, dict)])
+        # 模块运行中面板展开，已停止则整卡折叠（卡片保留不移除）
+        running = bool((modules.meta(module_id) or {}).get("running"))
+        blocks = [self._realtime_block(module_id, cfg, expanded=running)]
+        if has_events:
+            blocks.append(self._events_block(module_id, cfg, varpool,
+                                             expanded=running))
+        if has_temps:
+            blocks.append(self._temps_block(module_id, cfg, varpool,
+                                            expanded=running))
         blocks.append(self._settings_block(module_id, spec, cfg, varpool))
-        sections = [s for s in ("输出映射表" if has_outputs else None,
-                                "输入映射表", "模块设置") if s]
+        sections = [s for s in ("事件流" if has_events else None,
+                                "临时变量" if has_temps else None,
+                                "模块设置") if s]
         return self._card_shell(
             meta["name"],
             subtitle=f"{module_id} · {' / '.join(sections)}",
@@ -415,17 +472,14 @@ class LinkPage(XamlClass, Page):
             trailing=self._status_trailing(module_id),
             blocks=blocks)
 
-    def _dynamic(self, module_id: str) -> bool:
-        return bool((self.shell.engine.modules.meta(module_id)
-                     or {}).get("dynamic_params"))
-
     # ------------------------------------------------------------- 实时数据
 
-    def _realtime_block(self, module_id: str, cfg: dict) -> object:
+    def _realtime_block(self, module_id: str, cfg: dict, *,
+                        expanded: bool = True) -> object:
         """实时数据子卡片：模块收到的输入数值实时状态（中英对照网格）。"""
         meta = self.shell.engine.modules.meta(module_id) or {}
         if meta.get("realtime_manager"):
-            return self._detector_block(module_id, cfg)
+            return self._detector_block(module_id, cfg, expanded=expanded)
         entries: list[tuple[str, str]] = [
             (str(name), str((item or {}).get("label") or ""))
             for name, item in (meta.get("params") or {}).items()]
@@ -439,8 +493,6 @@ class LinkPage(XamlClass, Page):
             except Exception:
                 pass
         inner = W.stack(spacing=6, h="stretch")
-        inner.Children.Append(W.text("实时数据（输入数值 · 中英对照）",
-                                     size=13, bold=W.SEMIBOLD))
         inner.Children.Append(W.text(
             "显示模块实际收到的输入数值；上为实时值，下为「中文说明 变量名」"
             "（变量名即映射表达式中的 {名称}）。",
@@ -454,7 +506,9 @@ class LinkPage(XamlClass, Page):
                 g.Children.Append(W.put(self._signal_cell(module_id, name,
                                                           label), i))
             inner.Children.Append(g)
-        return W.panel(inner, padding=14)
+        return W.panel(W.collapsible("实时数据", inner,
+                                     subtitle="（输入数值 · 中英对照）",
+                                     expanded=expanded), padding=14)
 
     def _signal_cell(self, module_id: str, name: str, label: str) -> object:
         value_tb = W.text("—", size=14, bold=W.SEMIBOLD, family="Consolas",
@@ -469,10 +523,9 @@ class LinkPage(XamlClass, Page):
 
     # ------------------------------------------------ 实时参数（画面识别）
 
-    def _detector_block(self, module_id: str, cfg: dict) -> object:
+    def _detector_block(self, module_id: str, cfg: dict, *,
+                        expanded: bool = True) -> object:
         inner = W.stack(spacing=6, h="stretch")
-        inner.Children.Append(W.text("实时参数（参数名 ← 检测行为，改动即时生效）",
-                                     size=13, bold=W.SEMIBOLD))
         inner.Children.Append(W.text(
             "每个参数名即映射表达式中的 {变量}：行为四选一——检测颜色/检测图片/检测数值"
             "输出 真/假 或数值，检测数值条输出 0~1。区域坐标为截图图像像素，"
@@ -488,7 +541,9 @@ class LinkPage(XamlClass, Page):
             inner.Children.Append(self._detector_row(module_id, cfg, entry))
         inner.Children.Append(self._add_row(
             "添加参数", lambda s, e, _m=module_id: self._add_detector(_m)))
-        return W.panel(inner, padding=14)
+        return W.panel(W.collapsible("实时参数", inner,
+                                     subtitle="（参数名 ← 检测行为，改动即时生效）",
+                                     expanded=expanded), padding=14)
 
     def _detector_row(self, module_id: str, cfg: dict, entry: dict) -> object:
         top = W.grid(W.fixed(150), W.fixed(110), W.star(1), W.auto())
@@ -769,10 +824,8 @@ class LinkPage(XamlClass, Page):
     def _save_and_reload(self, module_id: str) -> None:
         cfg = self.shell.engine.modules.settings_for(module_id)
         cfg.save()
-        inst = self.shell.engine.modules.instance(module_id)
-        reload = getattr(inst, "reload_config", None)
-        if reload is not None:
-            self.shell.submit(reload())
+        # 原生 reload_config + 宿主逻辑表（临时变量/事件流）一并重载
+        self.shell.submit(self.shell.engine.modules.reload(module_id))
 
     def _detector_error(self, module_id: str, entry: dict) -> str:
         inst = self.shell.engine.modules.instance(module_id)
@@ -784,7 +837,8 @@ class LinkPage(XamlClass, Page):
 
 
     def _var_pool(self, module_id: str) -> list[str]:
-        """表达式变量池：模块声明参数 ∪ 模块自定义参数 ∪ 核心输出参数 ∪ 运行期信号。"""
+        """表达式变量池：模块声明参数 ∪ 模块自定义参数 ∪ 临时变量 ∪
+        核心输出参数 ∪ 运行期信号。"""
         pool: set[str] = set()
         meta = self.shell.engine.modules.meta(module_id) or {}
         for name in (meta.get("params") or {}):
@@ -814,227 +868,274 @@ class LinkPage(XamlClass, Page):
                 pool.add(sp["key"])
         pool.update(("Strength", "Limit", "max", "Battery", "Connected",
                      "Pressure", "Action"))
+        # 临时变量（模块声明 + 用户表达式行）全部可被表达式引用
+        for spec in self.shell.engine.modules.temp_specs_for(module_id):
+            if spec.get("key"):
+                pool.add(str(spec["key"]))
+        cfg = self.shell.engine.modules.settings_for(module_id)
+        for row in (cfg.get("temps") or []):
+            if isinstance(row, dict) and row.get("name"):
+                pool.add(str(row["name"]))
         return sorted(pool)
 
-    # ------------------------------------------------------------ 输入映射表
+    def _temp_pool(self, module_id: str) -> list[str]:
+        """事件流绑定用变量池：仅临时参数（模块自动注册 + 用户表达式行）。
 
-    def _input_block(self, module_id: str, cfg: dict, varpool) -> object:
-        dynamic = self._dynamic(module_id)
-        rows = []
-        for entry in cfg.get("mappings") or []:
-            if isinstance(entry, dict):
-                rows.append(self._input_row(module_id, cfg, entry, varpool,
-                                            dynamic))
-        if not rows:
-            rows.append(self._placeholder_row("（暂无输入映射，点击下方「添加映射」新建）"))
-        rows.append(self._add_row(
-            "添加映射",
-            lambda s, e, _m=module_id: self._add_mapping(_m)))
-        if dynamic:
-            caption = ("输入映射表（核心输入参数 ← 头像参数：选择核心参数即自动生成"
-                       "默认参数名与表达式，参数名可自定义，表达式可混合 {模块参数} 与"
-                       " {核心输出参数} 四则运算）")
-            return self._block(caption, _IN_OSC_COLS, _IN_OSC_HEAD, rows,
-                               tail_button=True)
-        return self._block(
-            "输入映射表（核心输入参数 ← 表达式：核心参数名固定不可改，"
-            "表达式可混合 {模块参数} 与 {核心输出参数}，"
-            "「参数」「运算」下拉快速插入，结果取整钳制后派发设备动作）",
-            _IN_COLS, _IN_HEAD, rows, tail_button=True)
+        与表达式变量池（_var_pool，可含核心参数）不同，事件流动作绑定
+        只允许引用临时变量——数据一律经临时变量流转。
+        """
+        modules = self.shell.engine.modules
+        pool: set[str] = set()
+        for spec in modules.temp_specs_for(module_id):
+            if spec.get("key"):
+                pool.add(str(spec["key"]))
+        cfg = modules.settings_for(module_id)
+        for row in (cfg.get("temps") or []):
+            if isinstance(row, dict) and row.get("name"):
+                pool.add(str(row["name"]))
+        return sorted(pool)
 
-    def _input_row(self, module_id: str, cfg: dict, entry: dict,
-                   varpool, dynamic: bool = False) -> object:
-        key = str(entry.get("param") or "")
+    # ------------------------------------------------------------- 事件流
 
-        def _pick(sender, args, _e=entry, _cfg=cfg) -> None:
+    _TRIGGERS = (("period", "周期更新"), ("change", "变量变更时"),
+                 ("if", "if 判断"))
+
+    def _events_block(self, module_id: str, cfg: dict, varpool, *,
+                      expanded: bool = True) -> object:
+        """事件流大卡片：事件小卡片列表（驱动事件 + 动作直列）。"""
+        inner = W.stack(spacing=8, h="stretch")
+        inner.Children.Append(W.text(
+            "每张事件小卡片 = 驱动事件 + 动作直列：周期更新（按毫秒轮询）、"
+            "变量变更时（值变化即触发）、if 判断（判断体为真触发一次，可写 "
+            "bool 变量名或 {HP} > 40 式条件）。动作不做运算——「输入」把变量"
+            "当前值派发给核心参数（触发即生效，同值也重复执行），「输出」把"
+            "核心信号实时值写入临时变量；运算请写在临时变量表。",
+            size=11, color="text3", wrap=True))
+        cards = [e for e in (cfg.get("events") or []) if isinstance(e, dict)]
+        if not cards:
+            inner.Children.Append(self._placeholder_row(
+                "（暂无事件：点击下方「添加事件」新建）"))
+        for card in cards:
+            inner.Children.Append(self._event_card(module_id, cfg, card,
+                                                   varpool))
+        inner.Children.Append(self._add_row(
+            "添加事件", lambda s, e, _m=module_id: self._add_event(_m)))
+        return W.panel(W.collapsible("事件流", inner,
+                                     subtitle="（事件小卡片 · 驱动事件 → 动作直列）",
+                                     expanded=expanded), padding=14)
+
+    def _event_card(self, module_id: str, cfg: dict, card: dict,
+                    varpool) -> object:
+        inner = W.stack(spacing=6, h="stretch")
+        head = W.grid(W.fixed(120), W.auto(), W.star(1), W.auto())
+        head.ColumnSpacing = 8
+
+        def _commit_name(text, _c=card, _cfg=cfg):
+            if self._updating:
+                return
+            name = (text or "").strip()
+            if name and _c.get("name") != name:
+                _c["name"] = name
+                _cfg.save()
+
+        name_box = W.text_box(text=str(card.get("name") or ""), width=120)
+        name_box.TextChanged += lambda s, e, _b=name_box: _commit_name(
+            (_b.Text or "").strip())
+        head.Children.Append(W.put(_vcenter(name_box), 0))
+
+        trigger = str(card.get("trigger") or "period")
+        combo = _vcenter(W.combo([label for _k, label in self._TRIGGERS],
+                                 selected=next(
+                                     (i for i, (k, _l)
+                                      in enumerate(self._TRIGGERS)
+                                      if k == trigger), 0)))
+
+        def _pick_trigger(sender, args, _c=card, _cfg=cfg):
             if self._updating:
                 return
             idx = combo.SelectedIndex
-            if not isinstance(idx, int) or not 0 <= idx < len(self._core_choices):
-                return
-            new_key = self._core_choices[idx][0]
-            if _e.get("param") != new_key:
-                _e["param"] = new_key
-                if dynamic:
-                    name = default_input_name(_cfg, new_key)
-                    _e["name"] = name
-                    _e["expr"] = "{" + name + "}"
+            if isinstance(idx, int) and 0 <= idx < len(self._TRIGGERS) \
+                    and _c.get("trigger") != self._TRIGGERS[idx][0]:
+                _c["trigger"] = self._TRIGGERS[idx][0]
                 _cfg.save()
-                self.rebuild()
+                self.rebuild()          # 驱动参数控件随种类切换
 
-        def _commit(text: str, _e=entry, _cfg=cfg) -> None:
+        combo.SelectionChanged += _pick_trigger
+        head.Children.Append(W.put(_vcenter(combo), 1))
+        head.Children.Append(W.put(self._trigger_arg(module_id, cfg, card,
+                                                     varpool), 2))
+
+        def _remove(_c=cfg, _card=card):
             if self._updating:
                 return
-            if _e.get("expr") != text:
-                _e["expr"] = text
-                _cfg.save()
-
-        def _commit_name(text: str, _e=entry, _cfg=cfg) -> None:
-            if self._updating or not text:
-                return
-            old = str(_e.get("name") or "")
-            if old == text:
-                return
-            _e["name"] = text
-            changed_expr = False
-            current = str(_e.get("expr") or "").strip()
-            if not current or current == "{" + old + "}":
-                _e["expr"] = "{" + text + "}"
-                changed_expr = True
-            _cfg.save()
-            if changed_expr:
-                self.rebuild()
-
-        def _remove(_e=entry, _cfg=cfg) -> None:
-            if self._updating:
-                return
-            _cfg["mappings"] = [r for r in (_cfg.get("mappings") or [])
-                                if r is not _e]
+            _c["events"] = [e for e in (_c.get("events") or [])
+                            if e is not _card]
+            _c.save()
             self.rebuild()
 
-        combo = _vcenter(W.combo([label for _k, label in self._core_choices],
-                                 selected=self._core_index.get(key, 0)))
+        head.Children.Append(W.put(_vcenter(W.text_button(
+            "删除事件", symbol="Delete",
+            on_click=lambda s, e: _remove())), 3))
+        inner.Children.Append(head)
+        actions = [a for a in (card.get("actions") or [])
+                   if isinstance(a, dict)]
+        if not actions:
+            inner.Children.Append(self._placeholder_row(
+                "（暂无动作：添加「输入」把变量派发给核心参数，"
+                "或「输出」把核心信号写入变量）"))
+        for i, action in enumerate(actions):
+            inner.Children.Append(self._action_row(module_id, cfg, card, i,
+                                                   action, varpool))
+        adds = W.stack(horizontal=True, spacing=8)
+        adds.Children.Append(W.text_button(
+            "添加输入", symbol="Add",
+            on_click=lambda s, e, _m=module_id, _c=card:
+                self._add_action(_m, cfg, _c, "in")))
+        adds.Children.Append(W.text_button(
+            "添加输出", symbol="Add",
+            on_click=lambda s, e, _m=module_id, _c=card:
+                self._add_action(_m, cfg, _c, "out")))
+        inner.Children.Append(adds)
+        return W.panel(inner, padding=10)
+
+    def _trigger_arg(self, module_id: str, cfg: dict, card: dict, varpool):
+        """驱动事件参数控件：周期毫秒 / 变量下拉+实时值 / 判断体+真假。"""
+        trigger = str(card.get("trigger") or "period")
+
+        def _commit(value, _c=card, _cfg=cfg):
+            if self._updating:
+                return
+            if _c.get("arg") != value:
+                _c["arg"] = value
+                _cfg.save()
+
+        if trigger == "period":
+            try:
+                current = max(50, int(float(card.get("arg") or 100)))
+            except (TypeError, ValueError):
+                current = 100
+            return W.number_box(current, 50, 3600000, width=130,
+                                on_commit=lambda v: _commit(int(v)))
+
+        if trigger == "change":
+            cell: dict = {"kind": "var", "name": str(card.get("arg") or "")}
+            combo = self._var_combo(cell["name"], varpool, cell,
+                                    on_pick=_commit)
+            live_tb = W.text(_fmtv(self._event_values(module_id)
+                                   .get(cell["name"])),
+                             size=12, bold=W.SEMIBOLD, family="Consolas",
+                             trimming=True, v="center")
+            self._live_event.append((live_tb, module_id, cell))
+            wrap = W.grid(W.fixed(200), W.star(1))
+            wrap.Children.Append(W.put(combo, 0))
+            wrap.Children.Append(W.put(_gap(live_tb, 12), 1))
+            return wrap
+
+        cell = {"kind": "if", "cond": str(card.get("arg") or "")}
+
+        def _commit_cond(text, _cell=cell):
+            _cell["cond"] = text
+            _commit(text)
+
+        field = self._expr_field(str(card.get("arg") or ""), varpool,
+                                 placeholder="bool变量 或 {HP} > 40",
+                                 on_commit=_commit_cond)
+        truth_tb = W.text("—", size=12, bold=W.SEMIBOLD, family="Consolas",
+                          v="center")
+        self._live_event.append((truth_tb, module_id, cell))
+        wrap = W.grid(W.star(1), W.auto())
+        wrap.Children.Append(W.put(field, 0))
+        wrap.Children.Append(W.put(_gap(truth_tb, 12), 1))
+        return wrap
+
+    def _var_combo(self, current: str, varpool, cell: dict,
+                   on_pick=None) -> object:
+        """变量下拉：首项「（未选择）」，池外的存量引用追加在尾；
+        选择即更新 cell（实时可视化跟随切换），on_pick 提交落盘。"""
+        pool = ["（未选择）"] + [str(name) for name in varpool]
+        current = str(current or "").strip()
+        if current and current not in pool:
+            pool.append(current)
+        combo = _vcenter(W.combo(pool,
+                                 selected=pool.index(current) if current else 0))
+
+        def _pick(sender, args):
+            sel = combo.SelectedIndex
+            if self._updating or not isinstance(sel, int) or sel < 0:
+                return
+            name = "" if sel == 0 else pool[sel]
+            cell["name"] = name
+            if on_pick is not None:
+                on_pick(name)
+
         combo.SelectionChanged += _pick
-        name_box = None
-        if dynamic:
-            name_box = W.suggest_box(text=str(entry.get("name") or ""),
-                                     choices=varpool, placeholder="参数名")
-            name_box.HorizontalAlignment = HorizontalAlignment.Stretch
-            name_box.VerticalAlignment = VerticalAlignment.Center
-            name_box.QuerySubmitted += lambda sender, args, _b=name_box: \
-                _commit_name((_b.Text or "").strip())
-            name_box.LostFocus += lambda sender, args, _b=name_box: \
-                _commit_name((_b.Text or "").strip())
-        expr_field = self._expr_field(str(entry.get("expr") or ""), varpool,
-                                      placeholder="{DGLabStrengthA}",
-                                      on_commit=_commit)
-        live_tb = W.text(_fmtv(self._input_live(module_id, key)),
-                         size=12, bold=W.SEMIBOLD, family="Consolas",
-                         trimming=True, v="center")
-        self._live_in.append((live_tb, module_id, key))
-        delete = _vcenter(W.text_button("删除", symbol="Delete",
-                                        on_click=lambda s, e, _ent=entry: _remove()))
-        if dynamic:
-            return self._row(_IN_OSC_COLS, [
-                combo, name_box, expr_field, live_tb, delete])
-        return self._row(_IN_COLS, [
-            combo, expr_field, live_tb, delete])
+        return combo
 
-    def _input_live(self, module_id: str, key: str):
-        engine = self._engine(module_id)
-        return engine.last_values.get(key) if engine is not None else None
+    def _action_row(self, module_id: str, cfg: dict, card: dict, index: int,
+                    action: dict, varpool) -> object:
+        direction = str(action.get("dir") or "in")
 
-    def _add_mapping(self, module_id: str) -> None:
-        if self._updating:
-            return
-        cfg = self.shell.engine.modules.settings_for(module_id)
-        rows = [r for r in (cfg.get("mappings") or []) if isinstance(r, dict)]
-        used = {str(r.get("param") or "") for r in rows}
-        default = next((key for key, _l in self._core_choices
-                        if key not in used),
-                       self._core_choices[0][0] if self._core_choices else "")
-        if self._dynamic(module_id):
-            name = default_input_name(cfg, default)
-            rows.append({"param": default, "name": name,
-                         "expr": "{" + name + "}"})
-        else:
-            rows.append({"param": default, "expr": ""})
-        cfg["mappings"] = rows
-        cfg.save()
-        self.rebuild()
-
-    # ------------------------------------------------------------ 输出映射表
-
-    def _output_block(self, module_id: str, cfg: dict, varpool) -> object:
-        ids = self._output_ids(cfg)
-        rows = []
-        for entry in cfg.get("outputs") or []:
-            if isinstance(entry, dict):
-                rows.append(self._output_row(module_id, cfg, entry, ids, varpool))
-        if not rows:
-            rows.append(self._placeholder_row("（暂无输出映射，点击下方「添加映射」新建）"))
-        rows.append(self._add_row(
-            "添加映射",
-            lambda s, e, _m=module_id: self._add_output(_m)))
-        return self._block(
-            "输出映射表（模块字段 ← 核心输出参数表达式：来源参数固定，"
-            "模块侧参数名可自由重命名，「参数」「运算」下拉快速插入，"
-            "表达式取整/归真后回传）",
-            _OUT_COLS, _OUT_HEAD, rows, tail_button=True)
-
-    def _output_row(self, module_id: str, cfg: dict, entry: dict,
-                    ids: list, varpool) -> object:
-        key = str(entry.get("param") or "")
-        pairs = list(ids)
-        if key and key not in {k for k, _l in pairs}:
-            t = str((output_spec(key) or {}).get("type") or "")
-            label = label_of(key)
-            pairs.append((key, f"{label}（{t}）" if t else label))
-        index = next((i for i, (k, _l) in enumerate(pairs) if k == key), 0)
-
-        def _pick(sender, args, _e=entry, _pairs=pairs, _cfg=cfg) -> None:
+        def _pick(sender, args, _a=action, _c=cfg):
             if self._updating:
                 return
             idx = combo.SelectedIndex
-            if not isinstance(idx, int) or not 0 <= idx < len(_pairs):
-                return
-            new_key = _pairs[idx][0]
-            if _e.get("param") != new_key:
-                _e["param"] = new_key
-                _e["name"] = self._default_output_name(module_id, _cfg,
-                                                       new_key)
-                _e["expr"] = "{" + new_key + "}"
-                _e["type"] = str((output_spec(new_key) or {}).get("type")
-                                 or "Int")
-                _cfg.save()
-                self.rebuild()
+            choices = self._param_choices(cfg, direction)
+            if isinstance(idx, int) and 0 <= idx < len(choices) \
+                    and _a.get("param") != choices[idx][0]:
+                _a["param"] = choices[idx][0]
+                _c.save()
 
-        def _commit_name(text: str, _e=entry, _cfg=cfg) -> None:
-            if self._updating or not text:
-                return
-            if _e.get("name") != text:
-                _e["name"] = text
-                _cfg.save()
-
-        def _commit_expr(text: str, _e=entry, _cfg=cfg) -> None:
+        def _commit_var(name, _a=action, _c=cfg):
             if self._updating:
                 return
-            if _e.get("expr") != text:
-                _e["expr"] = text
-                _cfg.save()
+            if _a.get("var") != name:
+                _a["var"] = name
+                _c.save()
 
-        def _remove(_e=entry, _cfg=cfg) -> None:
+        def _remove(_c=cfg, _card=card, _i=index):
             if self._updating:
                 return
-            _cfg["outputs"] = [r for r in (_cfg.get("outputs") or [])
-                               if r is not _e]
+            _card["actions"] = [a for j, a in
+                                enumerate(_card.get("actions") or [])
+                                if j != _i]
+            _c.save()
             self.rebuild()
 
-        name = str(entry.get("name") or "")
-        combo = _vcenter(W.combo([label for _k, label in pairs],
-                                 selected=index))
+        choices = self._param_choices(cfg, direction)
+        current = str(action.get("param") or "")
+        idx = next((i for i, (k, _l) in enumerate(choices) if k == current), 0)
+        combo = _vcenter(W.combo([label for _k, label in choices],
+                                 selected=idx))
         combo.SelectionChanged += _pick
-        name_box = W.suggest_box(text=name, choices=varpool,
-                                 placeholder="参数名", on_commit=_commit_name)
-        name_box.HorizontalAlignment = HorizontalAlignment.Stretch
-        name_box.VerticalAlignment = VerticalAlignment.Center
-        expr_field = self._expr_field(str(entry.get("expr") or ""), varpool,
-                                      placeholder="{" + key + "}",
-                                      on_commit=_commit_expr)
-        live_tb = W.text(_fmtv(self._output_live(module_id, name)),
+        cell: dict = {"kind": "var", "name": str(action.get("var") or "")}
+        # 事件流绑定的变量只允许临时参数（模块自动注册 + 用户表达式行）
+        var_combo = self._var_combo(cell["name"], self._temp_pool(module_id),
+                                    cell, on_pick=_commit_var)
+        live_tb = W.text(_fmtv(self._event_values(module_id)
+                               .get(cell["name"])),
                          size=12, bold=W.SEMIBOLD, family="Consolas",
                          trimming=True, v="center")
-        self._live_out.append((live_tb, module_id, name))
-        return self._row(_OUT_COLS, [
-            combo, name_box, expr_field, live_tb,
+        self._live_event.append((live_tb, module_id, cell))
+        return self._row(_ACTION_COLS, [
+            _vcenter(W.text("输入" if direction == "in" else "输出",
+                            size=12, bold=W.SEMIBOLD,
+                            color="accent_text" if direction == "in"
+                            else "success")),
+            combo,
+            _vcenter(W.text("←" if direction == "in" else "→", size=14,
+                            family="Consolas", color="text3")),
+            var_combo,
+            live_tb,
             _vcenter(W.text_button("删除", symbol="Delete",
-                                   on_click=lambda s, e, _ent=entry: _remove()))])
+                                   on_click=lambda s, e: _remove())),
+        ])
 
-    def _output_live(self, module_id: str, name: str):
-        engine = self._engine(module_id)
-        if engine is None or not name:
-            return None
-        return engine.out_values.get(name)
+    def _param_choices(self, cfg: dict,
+                       direction: str) -> list[tuple[str, str]]:
+        """动作可选括参数：输入 = 核心输入参数；输出 = 核心输出信号。"""
+        if direction == "in":
+            return list(self._core_choices)
+        return self._output_ids(cfg)
 
     def _output_ids(self, cfg: dict) -> list:
         ids: list[tuple[str, str]] = []
@@ -1046,7 +1147,8 @@ class LinkPage(XamlClass, Page):
             names = {}
         for sid in sorted(names):
             info = names[sid]
-            for spec in output_specs(info["family"], int(info.get("index", 1))):
+            for spec in output_specs(info["family"],
+                                     int(info.get("index", 1))):
                 if spec["key"] not in seen:
                     seen.add(spec["key"])
                     ids.append((spec["key"],
@@ -1055,51 +1157,152 @@ class LinkPage(XamlClass, Page):
             ids.append(("Action", "App 按键反馈（Int）"))
         return ids
 
-    def _add_output(self, module_id: str) -> None:
+    def _add_action(self, module_id: str, cfg: dict, card: dict,
+                    direction: str) -> None:
         if self._updating:
             return
-        cfg = self.shell.engine.modules.settings_for(module_id)
-        rows = [r for r in (cfg.get("outputs") or []) if isinstance(r, dict)]
-        ids = self._output_ids(cfg)
-        used = {str(r.get("param") or "") for r in rows}
-        key, _label = next(((k, l) for k, l in ids if k not in used),
-                           ("Action", "App 按键反馈"))
-        spec = output_spec(key) or {}
-        rows.append({"param": key,
-                     "name": self._default_output_name(module_id, cfg, key),
-                     "expr": "{" + key + "}",
-                     "type": str(spec.get("type") or "Int")})
-        cfg["outputs"] = rows
+        actions = [a for a in (card.get("actions") or [])
+                   if isinstance(a, dict)]
+        choices = self._param_choices(cfg, direction)
+        used = {str(a.get("param") or "") for a in actions
+                if str(a.get("dir") or "in") == direction}
+        default = next((k for k, _l in choices if k not in used),
+                       choices[0][0] if choices else "")
+        actions.append({"dir": direction, "param": default, "var": ""})
+        card["actions"] = actions
         cfg.save()
         self.rebuild()
 
-    def _default_output_name(self, module_id: str, cfg: dict, key: str) -> str:
-        """输出行默认模块侧参数名：META["reads"] 声明优先，OSC 按设备前缀，其余取短名。"""
-        meta = self.shell.engine.modules.meta(module_id) or {}
-        spec = output_spec(key) or {}
-        signal = str(spec.get("signal") or str(key).split(".")[-1])
-        reads = meta.get("reads") or {}
-        if signal in reads:
-            return str((reads.get(signal) or {}).get("name") or signal)
-        if meta.get("dynamic_params"):
-            return default_output_name(cfg, key)
-        return signal
+    def _add_event(self, module_id: str) -> None:
+        if self._updating:
+            return
+        cfg = self.shell.engine.modules.settings_for(module_id)
+        cards = [e for e in (cfg.get("events") or []) if isinstance(e, dict)]
+        used = {str(c.get("name") or "") for c in cards}
+        serial = 1
+        while f"事件{serial}" in used:
+            serial += 1
+        cards.append({"name": f"事件{serial}", "trigger": "period",
+                      "arg": 100, "actions": []})
+        cfg["events"] = cards
+        cfg.save()
+        self.rebuild()
+
+    def _temps_block(self, module_id: str, cfg: dict, varpool, *,
+                     expanded: bool = True) -> object:
+        """临时变量面板：模块声明行（模块维护）+ 用户表达式行（引擎求值）。"""
+        modules = self.shell.engine.modules
+        declared_keys = {str(s.get("key") or "")
+                         for s in modules.temp_specs_for(module_id)}
+        user_names: set[str] = set()
+        rows = []
+        for entry in (cfg.get("temps") or []):
+            if isinstance(entry, dict):
+                user_names.add(str(entry.get("name") or ""))
+                rows.append(self._temp_row(module_id, cfg, entry, varpool))
+        for key in sorted(declared_keys - user_names):
+            spec = next((s for s in modules.temp_specs_for(module_id)
+                         if str(s.get("key") or "") == key), {})
+            rows.insert(0, self._declared_temp_row(module_id, key, spec))
+        if not rows:
+            rows.append(self._placeholder_row(
+                "（暂无临时变量：点击下方「添加变量」新建，或由模块声明）"))
+        rows.append(self._add_row(
+            "添加变量",
+            lambda s, e, _m=module_id: self._add_temp(_m)))
+        return self._block(
+            "临时变量（名字 ← 表达式：每次映射重算按序求值，全部表达式与"
+            "事件条件可 {名} 引用；自引用取上一轮值可做累加器，模块声明的"
+            "变量由模块代码读写）",
+            _TEMP_COLS, _TEMP_HEAD, rows, tail_button=True, expanded=expanded)
+
+    def _declared_temp_row(self, module_id: str, key: str, spec: dict) -> object:
+        label = str(spec.get("label") or "")
+        desc = str(spec.get("desc") or "")
+        caption = f"{key}（模块维护）" if not label else f"{key} · {label}"
+        name_cell = W.stack(spacing=1, v="center")
+        name_cell.Children.Append(W.text(caption, size=12, v="center"))
+        if desc:
+            name_cell.Children.Append(W.text(desc, size=10, color="text3",
+                                             trimming=True))
+        live_tb = W.text(_fmtv(self._temp_live(module_id, key)), size=12,
+                         bold=W.SEMIBOLD, family="Consolas", trimming=True,
+                         v="center")
+        self._live_temps.append((live_tb, module_id, key))
+        return self._row(_TEMP_COLS, [
+            _vcenter(name_cell),
+            _vcenter(W.text("（模块维护）", size=11, color="text3")),
+            live_tb,
+            _vcenter(W.text("", size=12)),
+        ])
+
+    def _temp_row(self, module_id: str, cfg: dict, entry: dict,
+                  varpool) -> object:
+        def _commit_name(text: str, _e=entry, _c=cfg) -> None:
+            if self._updating:
+                return
+            name = (text or "").strip()
+            if not name or name == str(_e.get("name") or ""):
+                return
+            _e["name"] = name
+            _c.save()
+            self.rebuild()
+
+        def _commit_expr(text: str, _e=entry, _c=cfg) -> None:
+            if self._updating:
+                return
+            if _e.get("expr") != text:
+                _e["expr"] = text
+                _c.save()
+
+        def _remove(_e=entry, _c=cfg) -> None:
+            if self._updating:
+                return
+            _c["temps"] = [r for r in (_c.get("temps") or []) if r is not _e]
+            _c.save()
+            self.rebuild()
+
+        name_box = W.suggest_box(text=str(entry.get("name") or ""),
+                                 choices=varpool, placeholder="变量名")
+        name_box.HorizontalAlignment = HorizontalAlignment.Stretch
+        name_box.VerticalAlignment = VerticalAlignment.Center
+        name_box.QuerySubmitted += lambda sender, args, _b=name_box: \
+            _commit_name((_b.Text or "").strip())
+        name_box.LostFocus += lambda sender, args, _b=name_box: \
+            _commit_name((_b.Text or "").strip())
+        expr_field = self._expr_field(str(entry.get("expr") or ""), varpool,
+                                      placeholder="{loudness} > 40",
+                                      on_commit=_commit_expr)
+        live_tb = W.text(_fmtv(self._temp_live(
+            module_id, str(entry.get("name") or ""))), size=12,
+            bold=W.SEMIBOLD, family="Consolas", trimming=True, v="center")
+        self._live_temps.append((live_tb, module_id,
+                                 str(entry.get("name") or "")))
+        delete = _vcenter(W.text_button("删除", symbol="Delete",
+                                        on_click=lambda s, e: _remove()))
+        return self._row(_TEMP_COLS, [name_box, expr_field, live_tb, delete])
+
+    def _temp_live(self, module_id: str, name: str):
+        return self.shell.engine.modules.temps_space(module_id).get(name)
+
+    def _add_temp(self, module_id: str) -> None:
+        if self._updating:
+            return
+        cfg = self.shell.engine.modules.settings_for(module_id)
+        rows = [r for r in (cfg.get("temps") or []) if isinstance(r, dict)]
+        used = {str(r.get("name") or "") for r in rows}
+        serial = 1
+        while f"temp{serial}" in used:
+            serial += 1
+        rows.append({"name": f"temp{serial}", "expr": ""})
+        cfg["temps"] = rows
+        cfg.save()
+        self.rebuild()
 
     # -------------------------------------------------------------- 模块设置
 
     def _settings_block(self, module_id: str, spec: dict, cfg: dict,
                         varpool) -> object:
-        head = W.stack(horizontal=True, spacing=6, v="center")
-        head.Children.Append(W.text("OSC 地址与端口" if module_id == "osc_bridge"
-                                    else "模块设置",
-                                    size=13, bold=W.SEMIBOLD))
-        head.Children.Append(W.text(
-            "（修改后重新开关上方桥接生效）" if module_id == "osc_bridge"
-            else "（修改后重新开关上方模块生效）",
-            size=11, color="text3", v="center"))
-        inner = W.stack(spacing=8, h="stretch")
-        inner.Children.Append(head)
-        inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
         rows = []
         for key, item in spec.items():
             if not isinstance(item, dict):
@@ -1114,8 +1317,13 @@ class LinkPage(XamlClass, Page):
             if i:
                 body.Children.Append(W.divider())
             body.Children.Append(row)
-        inner.Children.Append(body)
-        return W.panel(inner, padding=14)
+        # 模块设置默认折叠：卡片纵向以映射表为主，设置项点击标题展开
+        return W.panel(W.collapsible(
+            "OSC 地址与端口" if module_id == "osc_bridge" else "模块设置",
+            body,
+            subtitle="（修改后重新开关上方桥接生效）" if module_id == "osc_bridge"
+                     else "（修改后重新开关上方模块生效）",
+            expanded=False), padding=14)
 
     def _declared_row(self, key: str, item: dict, cfg: dict, varpool) -> object:
         itype = str(item.get("type") or "str")

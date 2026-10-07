@@ -8,7 +8,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dglab import expr
-from dglab.mapping import MappingEngine, as_number
+from dglab.mapping import (MappingEngine, as_number, event_cards,
+                           temp_rows)
 
 
 class ExprTests(unittest.TestCase):
@@ -169,7 +170,7 @@ class ChannelLimitClampTests(unittest.TestCase):
         self.assertEqual(input_limit_signal("in_strength_b"), "COYOTE.LimitB")
         self.assertEqual(input_limit_signal("in_ovc_strength_a"), "OVC.LimitA")
         self.assertIsNone(input_limit_signal("in_wave_a"))
-        self.assertIsNone(input_limit_signal("in_zap_a"))
+        self.assertIsNone(input_limit_signal("in_fire_a"))
         self.assertIsNone(input_limit_signal("in_fire"))
         self.assertIsNone(input_limit_signal(""))
 
@@ -322,18 +323,213 @@ class DispatcherEdgeTests(unittest.TestCase):
             ("fire", "start", "A"),
         ])
 
-    def test_zap_and_emergency_dedupe(self):
+    def test_emergency_dedupe(self):
+        # 瞬时脉冲（zap）参数已从核心目录移除（用户判定无意义），仅剩急停
         api, actions = self._actions()
-        actions["in_zap_a"](1)
-        actions["in_zap_a"](1)
         actions["in_emergency"](1)
         actions["in_emergency"](1)
-        self.assertEqual(api.calls, [("zap", "A"), ("emergency",)])
+        self.assertEqual(api.calls, [("emergency",)])
 
 
 async def _noop_coro():
     pass
 
 
+class TempVarTests(unittest.TestCase):
+    """临时变量表：按序求值并入值空间，自引用构成累加器，信号优先级更高。"""
+
+    def setUp(self):
+        self.sent: list[tuple[str, int]] = []
+        self.engine = MappingEngine(
+            lambda key, value: self.sent.append((key, value)),
+            device_vars=lambda: {"StrengthA": 50},
+            ranges={"in_strength_a": (0, 200), "in_fire": (0, 1)},
+            default_range=(0, 200))
+
+    def test_temp_rows_filters_invalid(self):
+        self.assertEqual(temp_rows([
+            {"name": "a", "expr": "{x}+1"},
+            {"name": "", "expr": "1"},          # 无名丢弃
+            {"name": "b", "expr": ""},          # 无表达式丢弃
+            {"name": "a", "expr": "2"},         # 同名去重（取首个）
+        ]), [{"name": "a", "expr": "{x}+1"}])
+
+    def test_temp_visible_to_mapping_and_value_space(self):
+        self.engine.set_temp_rows([{"name": "half", "expr": "{StrengthA}/2"}])
+        self.sent = []                       # set_mappings 首轮 pump 不算
+        self.engine.set_mappings({"in_strength_a": "{half}*2"})
+        self.assertEqual(self.sent, [("in_strength_a", 50)])
+        self.assertEqual(self.engine.values()["half"], 25.0)
+
+    def test_temp_self_reference_accumulates(self):
+        # 装载即求值一轮；自引用取上一轮值，每次重算 +1
+        self.engine.set_temp_rows([{"name": "count", "expr": "{count}+1"}])
+        self.assertEqual(self.engine.temps["count"], 1.0)
+        self.engine.pump()
+        self.engine.pump()
+        self.assertEqual(self.engine.temps["count"], 3.0)
+
+    def test_signal_overrides_temp(self):
+        self.engine.set_temp_rows([{"name": "x", "expr": "1"}])
+        self.engine.pump()
+        self.engine.signal("x", 9)     # 信号优先：临时变量不覆盖
+        self.assertEqual(self.engine.values()["x"], 9.0)
+
+    def test_temp_error_recorded(self):
+        self.engine.set_temp_rows([{"name": "bad", "expr": "1/0"}])
+        self.engine.pump()
+        self.assertIn("temp:bad", self.engine.errors)
+
+    def test_shared_space_attached(self):
+        shared: dict[str, float] = {}
+        self.engine.attach_temps(shared)
+        self.engine.set_temp_rows([{"name": "n", "expr": "7"}])
+        self.engine.pump()
+        self.assertIs(self.engine.temps, shared)
+        self.assertEqual(shared["n"], 7.0)
+
+
+class EventStreamTests(unittest.TestCase):
+    """事件流卡片：驱动事件（周期/变更/if）与动作直列（输入/输出）。"""
+
+    def setUp(self):
+        self.sent: list[tuple[str, int]] = []
+        self.engine = MappingEngine(
+            lambda key, value: self.sent.append((key, value)),
+            device_vars=lambda: {"StrengthA": 50, "LimitA": 200,
+                                 "OVC.Pressure": 12.5},
+            ranges={"in_strength_a": (0, 200), "in_fire": (0, 1)},
+            default_range=(0, 200))
+
+    def test_event_cards_normalizes(self):
+        cards = event_cards([
+            {"name": "A", "trigger": "period", "arg": 100,
+             "actions": [{"dir": "in", "param": "in_fire", "var": "x"},
+                         {"dir": "bad", "param": "p", "var": "v"},
+                         {"dir": "in", "param": "", "var": "v"}]},
+            {"trigger": "change", "arg": "x"},           # 无名 → 默认名
+            {"trigger": "nope", "arg": 1},               # 未知触发丢弃
+        ])
+        self.assertEqual([c["name"] for c in cards], ["A", "事件2"])
+        self.assertEqual(cards[0]["actions"],
+                         [{"dir": "in", "param": "in_fire", "var": "x"}])
+        self.assertEqual(cards[1]["trigger"], "change")
+
+    def test_period_trigger_fires_on_interval(self):
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "period", "arg": 100,
+             "actions": [{"dir": "in", "param": "in_fire", "var": "x"}]}])
+        self.engine.signal("x", 1)
+        self.assertEqual(self.engine.tick_event_cards(0.0), 1)  # 首拍即到期
+        self.assertEqual(self.sent, [("in_fire", 1)])
+        self.assertEqual(self.engine.tick_event_cards(0.05), 0)  # 未到期
+        # 到期：卡片触发计数为 1，但同值动作被去重、不重复派发
+        self.assertEqual(self.engine.tick_event_cards(0.1), 1)
+        self.assertEqual(self.sent, [("in_fire", 1)])
+        # 变量值变化后才重新派发
+        self.engine.signal("x", 0)
+        self.engine.tick_event_cards(0.21)     # 到期 → 派发 0
+        self.engine.signal("x", 1)
+        self.assertEqual(self.engine.tick_event_cards(0.42), 1)  # → 派发 1
+        self.assertEqual(self.sent, [("in_fire", 1), ("in_fire", 0),
+                                     ("in_fire", 1)])
+
+    def test_period_dispatch_does_not_overwrite_manual_change(self):
+        # 周期参数驱动不得覆写手动控制：变量值未变时重复触发不派发，
+        # 设备被手动改变后的状态得以保留
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "period", "arg": 50,
+             "actions": [{"dir": "in", "param": "in_strength_a",
+                          "var": "x"}]}])
+        self.engine.signal("x", 30)
+        self.engine.tick_event_cards(0.0)
+        self.assertEqual(self.sent, [("in_strength_a", 30)])
+        # 手动把设备调到 100（不经引擎）：变量仍是 30，周期触发不回写
+        for t in (0.05, 0.10, 0.15):
+            self.engine.tick_event_cards(t)
+        self.assertEqual(self.sent, [("in_strength_a", 30)])
+        self.assertEqual(self.engine.last_values.get("in_strength_a"), 30)
+
+    def test_change_trigger(self):
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "change", "arg": "x",
+             "actions": [{"dir": "in", "param": "in_strength_a",
+                          "var": "x"}]}])
+        self.engine.signal("x", 10)
+        self.assertEqual(self.engine.tick_event_cards(0.0), 0)  # 首拍采基线
+        self.engine.signal("x", 20)
+        self.assertEqual(self.engine.tick_event_cards(0.05), 1)
+        self.assertEqual(self.sent, [("in_strength_a", 20)])
+        self.assertEqual(self.engine.tick_event_cards(0.10), 0)  # 值未变
+
+    def test_if_trigger_rising_edge(self):
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "if", "arg": "{x} > 10",
+             "actions": [{"dir": "in", "param": "in_fire", "var": "x"}]}])
+        self.engine.signal("x", 5)
+        self.assertEqual(self.engine.tick_event_cards(0.0), 0)
+        self.engine.signal("x", 15)
+        self.assertEqual(self.engine.tick_event_cards(0.05), 1)  # 上升沿
+        self.assertEqual(self.engine.tick_event_cards(0.10), 0)  # 持真不重复
+        self.engine.signal("x", 3)
+        self.engine.tick_event_cards(0.15)                       # 归假
+        self.engine.signal("x", 30)
+        self.assertEqual(self.engine.tick_event_cards(0.20), 1)  # 再次上升沿
+
+    def test_if_trigger_bare_bool_var(self):
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "if", "arg": "flag",
+             "actions": [{"dir": "in", "param": "in_fire", "var": "flag"}]}])
+        self.engine.signal("flag", 1)
+        self.assertEqual(self.engine.tick_event_cards(0.0), 1)
+
+    def test_input_action_clamps_and_bool(self):
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "period", "arg": 50,
+             "actions": [{"dir": "in", "param": "in_strength_a", "var": "v"},
+                         {"dir": "in", "param": "in_fire", "var": "v"}]}])
+        self.engine.signal("v", 999)     # 强度钳到 200；fire 是 Bool 归 1
+        self.engine.tick_event_cards(0.0)
+        self.assertEqual(self.sent, [("in_strength_a", 200), ("in_fire", 1)])
+
+    def test_output_action_captures_signal_to_temp(self):
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "period", "arg": 50,
+             "actions": [{"dir": "out", "param": "OVC.Pressure",
+                          "var": "edge"}]}])
+        self.engine.tick_event_cards(0.0)
+        self.assertEqual(self.engine.temps["edge"], 12.5)
+
+    def test_missing_var_dispatches_zero(self):
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "period", "arg": 50,
+             "actions": [{"dir": "in", "param": "in_strength_a",
+                          "var": "ghost"}]}])
+        self.engine.tick_event_cards(0.0)
+        self.assertEqual(self.sent, [("in_strength_a", 0)])
+
+    def test_card_without_actions_skipped(self):
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "period", "arg": 50, "actions": []}])
+        self.assertEqual(self.engine.tick_event_cards(0.0), 0)
+        self.assertEqual(self.sent, [])
+        self.assertFalse(self.engine.has_events())
+
+    def test_temps_join_event_actions(self):
+        # 临时变量随 pump 前进，事件动作引用其当前值
+        self.engine.set_temp_rows([{"name": "count", "expr": "{count}+1"}])
+        self.engine.set_event_cards([
+            {"name": "A", "trigger": "period", "arg": 50,
+             "actions": [{"dir": "in", "param": "in_strength_a",
+                          "var": "count"}]}])
+        self.assertEqual(self.engine.temps["count"], 1.0)  # 装载求值一轮
+        self.engine.tick_event_cards(0.0)
+        self.assertEqual(self.sent, [("in_strength_a", 1)])
+        self.engine.pump()                                 # count=2
+        self.engine.tick_event_cards(0.05)
+        self.assertEqual(self.sent[-1], ("in_strength_a", 2))
+
+
 if __name__ == "__main__":
+    unittest.main()
     unittest.main()

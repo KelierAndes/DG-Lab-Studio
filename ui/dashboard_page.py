@@ -16,8 +16,7 @@ class DashboardPage(XamlClass, Page):
         super().__init__()
         self.shell = shell
         self.LoadComponentFromFile(xaml("DashboardPage.xaml"), encoding="utf-8")
-        self._st = None
-        self._lv = -1
+        self._state_seen: tuple | None = None
         self._mod_sig: tuple = ()
         self._last = 0.0
         self.rebuild()
@@ -27,12 +26,97 @@ class DashboardPage(XamlClass, Page):
         now = time.monotonic()
         if now - self._last < 0.4:
             return
+        # 结构签名（设备集合/模块生命周期）变了才整页重建；state 对象每次
+        # _publish 都换新（BLE 强度通知 10Hz），以对象身份作触发会造成
+        # 0.4s 一次、单次近 1s 的全页 XAML 重建（卡顿最大来源）
+        state_sig = self._state_sig()
         mod_sig = live.module_data_sig(shell.engine)
-        if shell.state is self._st and shell.logs.version == self._lv \
-                and mod_sig == self._mod_sig:
+        if state_sig == self._state_seen and mod_sig == self._mod_sig:
+            self._refresh_live_rows()
             return
-        self._mod_sig = mod_sig
         self.rebuild()
+
+    def _state_sig(self) -> tuple:
+        st = self.shell.state
+        return (st.backend,
+                tuple(sorted((sid, s.type) for sid, s in st.slots.items())))
+
+    def _refresh_live_rows(self) -> None:
+        """数据值卡与设备卡的 live 数值刷新：行集合不变时只改文本/meter
+        （跨 COM 写最小化），行集合变化则整页重建。"""
+        engine, state = self.shell.engine, self.shell.state
+        lines = live.input_value_rows(engine, state)
+        if [(l["kind"], l["name"]) for l in lines] \
+                != list(self._input_value_tbs):
+            self.rebuild()
+            return
+        for line in lines:
+            tb = self._input_value_tbs[(line["kind"], line["name"])]
+            if tb.Text != line["value"]:
+                tb.Text = line["value"]
+
+        out_lines = live.output_value_rows(engine, state)
+        if [l["name"] for l in out_lines] != list(self._output_value_tbs):
+            self.rebuild()
+            return
+        for line in out_lines:
+            refs = self._output_value_tbs[line["name"]]
+            if refs["value"].Text != line["value"]:
+                refs["value"].Text = line["value"]
+            self._set_meter(refs["meter"], line["percent"], width=110)
+            if refs["wave"].Text != line["wave"]:
+                refs["wave"].Text = line["wave"]
+
+        m_lines = live.module_output_value_rows(engine)
+        if [(l["kind"], l["name"]) for l in m_lines] \
+                != list(self._module_value_tbs):
+            self.rebuild()
+            return
+        for line in m_lines:
+            tb = self._module_value_tbs[(line["kind"], line["name"])]
+            if tb.Text != line["value"]:
+                tb.Text = line["value"]
+
+        for sid, cells in self._device_cells.items():
+            slot = state.slots.get(sid)
+            if slot is None:
+                continue
+            if slot.is_output_device:
+                for ch in ("A", "B"):
+                    out = live.output_row(slot, ch)
+                    tb = cells.get(f"strength_{ch}")
+                    if tb is not None and tb.Text != f"{out['value']}/{out['limit']}":
+                        tb.Text = f"{out['value']}/{out['limit']}"
+                    meter = cells.get(f"strength_{ch}_meter")
+                    if meter is not None:
+                        self._set_meter(meter, out["percent"], width=54)
+            else:
+                pressure = slot.pressure
+                text = f"{pressure:.2f} kPa" if pressure is not None else "—"
+                tb = cells.get("pressure")
+                if tb is not None and tb.Text != text:
+                    tb.Text = text
+                meter = cells.get("pressure_meter")
+                if meter is not None:
+                    percent = max(0.0, min(1.0, (pressure or 0.0)
+                                           / live.PRESSURE_MAX_KPA)) * 100
+                    self._set_meter(meter, percent, width=54)
+            bat = slot.battery or 0
+            tb = cells.get("battery")
+            if tb is not None and tb.Text != live.battery_text(slot):
+                tb.Text = live.battery_text(slot)
+            meter = cells.get("battery_meter")
+            if meter is not None:
+                self._set_meter(meter, bat, width=54)
+
+    @staticmethod
+    def _set_meter(meter, percent: float, *, width: float = 54) -> None:
+        ratio = max(0.0, min(1.0, percent / 100.0))
+        try:
+            fill = list(meter.Children)[1]
+            fill.Width = max(width * ratio, 6.0)
+        except Exception:
+            pass
 
     def on_notify(self) -> None:
         self.rebuild()
@@ -47,10 +131,13 @@ class DashboardPage(XamlClass, Page):
 
     def rebuild(self) -> None:
         shell = self.shell
-        self._st = shell.state
-        self._lv = shell.logs.version
+        self._state_seen = self._state_sig()
         self._mod_sig = live.module_data_sig(shell.engine)
         self._last = time.monotonic()
+        self._input_value_tbs: dict = {}
+        self._output_value_tbs: dict = {}
+        self._module_value_tbs: dict = {}
+        self._device_cells: dict = {}
 
         W.page_head(
             self.HeadHost,
@@ -75,7 +162,6 @@ class DashboardPage(XamlClass, Page):
             host.Children.Append(self._device_card(sid, state.slots[sid]))
         if not state.slots:
             host.Children.Append(self._empty_note())
-
     def _fill_stats(self) -> None:
         host = self.StatsHost
         host.Children.Clear()
@@ -143,9 +229,10 @@ class DashboardPage(XamlClass, Page):
         links.Children.Append(nav.link("控制", "control"))
 
         if not slot.is_output_device:
-            row = self._sensor_row(slot, links)
+            row, refs = self._sensor_row(slot, links)
         else:
-            row = self._output_row(slot, links)
+            row, refs = self._output_row(slot, links)
+        self._device_cells[sid] = refs
 
         inner = W.stack(spacing=8, h="stretch")
         inner.Children.Append(head)
@@ -158,48 +245,62 @@ class DashboardPage(XamlClass, Page):
         percent = max(0.0, min(1.0, (pressure or 0.0) / live.PRESSURE_MAX_KPA)) * 100
         row = W.grid(W.star(1.4), W.star(1), W.auto())
         row.ColumnSpacing = 16
-        row.Children.Append(W.put(self._quick_cell("气压", value, percent, "accent"), 0))
+        cell, refs = self._quick_cell("气压", value, percent, "accent", "pressure")
+        row.Children.Append(W.put(cell, 0))
         bat = slot.battery or 0
-        row.Children.Append(W.put(
-            self._quick_cell("电量", live.battery_text(slot), bat,
-                             "success" if bat > 60 else "warning"),
-            1))
+        bat_cell, bat_refs = self._quick_cell(
+            "电量", live.battery_text(slot), bat,
+            "success" if bat > 60 else "warning", "battery")
+        row.Children.Append(W.put(bat_cell, 1))
+        refs.update(bat_refs)
         row.Children.Append(W.put(_gap(links, 10), 2))
-        return row
+        return row, refs
 
     def _output_row(self, slot, links):
         row = W.grid(W.star(1), W.star(1), W.star(1), W.star(1.7), W.auto())
         row.ColumnSpacing = 16
+        refs: dict = {}
         for i, ch in enumerate(("A", "B")):
             out = live.output_row(slot, ch)
-            row.Children.Append(W.put(
-                self._quick_cell(f"{ch} 强度", f"{out['value']}/{out['limit']}",
-                                 out["percent"], "accent"),
-                i))
+            cell, cell_refs = self._quick_cell(
+                f"{ch} 强度", f"{out['value']}/{out['limit']}",
+                out["percent"], "accent", f"strength_{ch}")
+            row.Children.Append(W.put(cell, i))
+            refs.update(cell_refs)
         bat = slot.battery or 0
-        row.Children.Append(W.put(
-            self._quick_cell("电量", live.battery_text(slot), bat,
-                             "success" if bat > 60 else "warning"),
-            2))
+        bat_cell, bat_refs = self._quick_cell(
+            "电量", live.battery_text(slot), bat,
+            "success" if bat > 60 else "warning", "battery")
+        row.Children.Append(W.put(bat_cell, 2))
+        refs.update(bat_refs)
         waves = self.shell.engine.wave_selection()
         wave_a = live.wave_label(str(waves.get("A", "")))
         wave_b = live.wave_label(str(waves.get("B", "")))
-        row.Children.Append(W.put(self._wave_cell(f"A {wave_a} · B {wave_b}"), 3))
+        wave_cell, wave_refs = self._wave_cell(f"A {wave_a} · B {wave_b}")
+        row.Children.Append(W.put(wave_cell, 3))
+        refs.update(wave_refs)
         row.Children.Append(W.put(_gap(links, 10), 4))
-        return row
+        return row, refs
 
-    def _quick_cell(self, label: str, value: str, percent: float, tone: str):
+    def _quick_cell(self, label: str, value: str, percent: float, tone: str,
+                    key: str = ""):
         cell = W.stack(horizontal=True, spacing=8, v="center")
         cell.Children.Append(W.text(label, size=11, color="text3"))
-        cell.Children.Append(W.text(value, size=13, bold=W.SEMIBOLD))
-        cell.Children.Append(W.meter(percent, width=54, fg=tone))
-        return cell
+        value_tb = W.text(value, size=13, bold=W.SEMIBOLD)
+        cell.Children.Append(value_tb)
+        meter = W.meter(percent, width=54, fg=tone)
+        cell.Children.Append(meter)
+        refs = {}
+        if key:
+            refs = {key: value_tb, f"{key}_meter": meter}
+        return cell, refs
 
     def _wave_cell(self, value: str):
         cell = W.stack(horizontal=True, spacing=8, v="center")
         cell.Children.Append(W.text("波形", size=11, color="text3"))
-        cell.Children.Append(W.text(value, size=12, color="text2", trimming=True))
-        return cell
+        wave_tb = W.text(value, size=12, color="text2", trimming=True)
+        cell.Children.Append(wave_tb)
+        return cell, {"wave": wave_tb}
 
     def _empty_note(self):
         row = W.grid(W.star(1), W.auto())
@@ -358,22 +459,25 @@ class DashboardPage(XamlClass, Page):
         for i, line in enumerate(lines):
             if i:
                 rows.Children.Append(W.divider())
-            rows.Children.Append(self._input_value_row(line))
+            row, tb = self._input_value_row(line)
+            rows.Children.Append(row)
+            self._input_value_tbs[(line["kind"], line["name"])] = tb
         inner.Children.Append(rows)
         return W.card(inner)
 
-    def _input_value_row(self, line: dict) -> object:
+    def _input_value_row(self, line: dict) -> tuple:
         g = W.grid(W.star(1.4), W.fixed(96), W.star(1), W.fixed(74))
         gap = Thickness(12, 0, 0, 0)
         g.Children.Append(W.put(W.text(line["name"], size=12, color="text2",
                                        trimming=True, v="center"), 0))
         g.Children.Append(W.put(W.text(line["kind"], size=11, color="text3",
                                        margin=gap, v="center"), 1))
-        g.Children.Append(W.put(W.text(line["value"], size=13, bold=W.SEMIBOLD,
-                                       margin=gap, v="center"), 2))
+        value_tb = W.text(line["value"], size=13, bold=W.SEMIBOLD,
+                          margin=gap, v="center")
+        g.Children.Append(W.put(value_tb, 2))
         g.Children.Append(W.put(W.text(line["age"], size=11, color="text3",
                                        margin=gap, v="center"), 3))
-        return W.box(height=34, child=g)
+        return W.box(height=34, child=g), value_tb
 
     def _output_values_card(self) -> object:
         inner = self._card_frame(
@@ -398,7 +502,9 @@ class DashboardPage(XamlClass, Page):
         for i, line in enumerate(lines):
             if i:
                 rows.Children.Append(W.divider())
-            rows.Children.Append(self._output_value_row(line))
+            row, refs = self._output_value_row(line)
+            rows.Children.Append(row)
+            self._output_value_tbs[line["name"]] = refs
         inner.Children.Append(rows)
 
         module_lines = live.module_output_value_rows(self.shell.engine)
@@ -416,23 +522,28 @@ class DashboardPage(XamlClass, Page):
             for i, line in enumerate(module_lines):
                 if i:
                     m_rows.Children.Append(W.divider())
-                m_rows.Children.Append(self._input_value_row(line))
+                row, tb = self._input_value_row(line)
+                m_rows.Children.Append(row)
+                self._module_value_tbs[(line["kind"], line["name"])] = tb
             inner.Children.Append(m_rows)
         return W.card(inner)
 
-    def _output_value_row(self, line: dict) -> object:
+    def _output_value_row(self, line: dict) -> tuple:
         g = W.grid(W.star(1.4), W.fixed(88), W.star(1), W.star(1))
         gap = Thickness(12, 0, 0, 0)
         g.Children.Append(W.put(W.text(line["name"], size=12, color="text2",
                                        trimming=True, v="center"), 0))
-        g.Children.Append(W.put(W.text(line["value"], size=13, bold=W.SEMIBOLD,
-                                       margin=gap, v="center"), 1))
+        value_tb = W.text(line["value"], size=13, bold=W.SEMIBOLD,
+                          margin=gap, v="center")
+        g.Children.Append(W.put(value_tb, 1))
         meter = W.box(margin=gap, child=W.meter(line["percent"], width=110),
                       v="center", h="left")
         g.Children.Append(W.put(meter, 2))
-        g.Children.Append(W.put(W.text(line["wave"], size=11, color="text3",
-                                       margin=gap, trimming=True, v="center"), 3))
-        return W.box(height=34, child=g)
+        wave_tb = W.text(line["wave"], size=11, color="text3",
+                         margin=gap, trimming=True, v="center")
+        g.Children.Append(W.put(wave_tb, 3))
+        return (W.box(height=34, child=g),
+                {"value": value_tb, "meter": meter, "wave": wave_tb})
 
 def _gap(el, left: float):
     el.Margin = Thickness(left, 0, 0, 0)

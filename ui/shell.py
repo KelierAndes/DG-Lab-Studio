@@ -83,7 +83,10 @@ class MainWindow(XamlClass, Window):
         self._missing_prompt: dict | None = None
 
         timer = self.DispatcherQueue.CreateTimer()
-        timer.Interval = TimeSpan(Duration=100_000)
+        # UI 心跳 100ms:泵 ui_queue + 当前页 tick(各页内部另有 0.2~0.5s
+        # 数据刷新节流)。此前 10ms 会让跨 COM 的 XAML 属性写放大 10 倍,
+        # 是连接/控制/联动页卡顿的公共放大器。
+        timer.Interval = TimeSpan(Duration=1_000_000)
         timer.IsRepeating = True
         timer.Tick += self._on_tick
         timer.Start()

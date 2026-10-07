@@ -20,7 +20,7 @@ import module_store
 from module_store import (ModuleStore, _embedded_python_dir,
                           parse_requirements_text, requirement_name,
                           requirement_satisfied, version_key, pip_install)
-from plugins import PluginManager
+from plugins import PluginManager, _CLEANUP_MARKER
 from types import SimpleNamespace
 
 from ui.modules_page import online_section_state
@@ -613,6 +613,54 @@ class ModuleDeleteTests(unittest.TestCase):
         _unmap(lib)  # 应用退出 = 锁释放
         self.manager.discover()  # 下次启动清扫
         self.assertFalse(os.path.exists(module_dir + ".pending_delete"))
+
+    def test_delete_plain_open_handle_marks_cleanup(self):
+        # 普通打开句柄（无 FILE_SHARE_DELETE，杀软扫描/数据映射类）删不掉
+        # 且不可改名：短重试后放弃删除、不抛错；模块目录被打自动清理标记，
+        # 锁释放后的下次 discover 整目录清扫
+        module_dir = self._make_module("held")
+        extra = os.path.join(module_dir, "_deps", "x")
+        os.makedirs(extra)
+        data = os.path.join(extra, "blob.bin")
+        with open(data, "wb") as f:
+            f.write(b"payload")
+        fh = open(data, "rb")
+        try:
+            with unittest.mock.patch("plugins.time.sleep"):
+                self.manager.delete_module("held")  # 不抛错
+        finally:
+            fh.close()
+        self.assertTrue(os.path.isdir(module_dir))  # 占用中删不净，残留
+        self.assertTrue(os.path.isfile(
+            os.path.join(module_dir, "_deps", "x", "blob.bin")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(module_dir, _CLEANUP_MARKER)))
+        self.assertNotIn("held", self.manager._paths)  # 已从模块列表摘除
+        self.manager.discover()  # 锁释放，清扫
+        self.assertFalse(os.path.exists(module_dir))
+
+    def test_delete_transient_handle_retries_then_succeeds(self):
+        # 瞬时占用（杀软扫描类）：重试窗口内释放后删除成功，无残留
+        module_dir = self._make_module("transient")
+        extra = os.path.join(module_dir, "_deps", "x")
+        os.makedirs(extra)
+        data = os.path.join(extra, "blob.bin")
+        with open(data, "wb") as f:
+            f.write(b"payload")
+        fh = open(data, "rb")
+
+        def release(_seconds):
+            fh.close()
+
+        try:
+            with unittest.mock.patch("plugins.time.sleep",
+                                     side_effect=release):
+                self.manager.delete_module("transient")
+        finally:
+            fh.close()
+        self.assertFalse(os.path.exists(module_dir))
+        self.assertFalse(os.path.exists(module_dir + ".pending_delete"))
+        self.assertNotIn("transient", self.manager._paths)
 
     def test_discover_sweeps_pending_delete_leftovers(self):
         junk = os.path.join(self.modules_root, "ghost.pending_delete")

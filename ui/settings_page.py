@@ -219,9 +219,6 @@ class SettingsPage(XamlClass, Page):
     def _group_log(self) -> object:
         cfg = self.shell.engine.config
         rows = [
-            self._switch_row("记录通信数据帧", "收发的协议帧写入日志（内容较多）",
-                             bool(cfg.get("log_frames", True)),
-                             lambda value: cfg.__setitem__("log_frames", value)),
             self._switch_row("写日志文件", "记录到应用目录 dgstudio.log",
                              bool(cfg.get("log_to_file", True)),
                              self._log_file_changed),

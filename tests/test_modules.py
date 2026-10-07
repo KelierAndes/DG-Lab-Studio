@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import shutil
 import sys
@@ -141,6 +142,38 @@ _CARRIER_META = {"id": "carrier", "name": "模组携带", "version": "0.1.0",
                  "mods": {"dest": "BepInEx/plugins/AliceInCradleLink",
                           "marker": "AliceInCradle.exe"}}
 
+# 事件流/临时变量接口模块：META temps 声明 + bridge.engine（MappingEngine）
+_LOGIC_META = {"id": "logic", "name": "事件模块", "version": "0.1.0",
+               "description": "声明临时变量的模块。",
+               "temps": [{"key": "count", "label": "计数",
+                          "desc": "节拍计数"}]}
+_LOGIC_BODY = '''
+from dglab.mapping import MappingEngine
+
+
+class _Bridge:
+    def __init__(self, engine):
+        self.engine = engine
+
+
+class LogicModule:
+    id = META["id"]
+    name = META["name"]
+    version = META["version"]
+
+    def on_load(self, ctx):
+        self.ctx = ctx
+        self.sent = []
+        self.engine = MappingEngine(lambda k, v: self.sent.append((k, v)))
+        self.bridge = _Bridge(self.engine)
+
+    def on_unload(self):
+        pass
+
+    def is_running(self):
+        return False
+'''
+
 
 def _write_fixtures(root: str) -> None:
     buf = io.BytesIO()
@@ -152,6 +185,7 @@ def _write_fixtures(root: str) -> None:
     _write_module(root, "carrier", _CARRIER_META,
                   files={"mods/AliceInCradleLink.dll": b"MZ-fake-dll",
                          "vendor/BepInEx_win_test.zip": buf.getvalue()})
+    _write_module(root, "logic", _LOGIC_META, _LOGIC_BODY)
 
 
 class _FixtureRoots:
@@ -186,6 +220,7 @@ class ModuleDiscoveryTests(unittest.TestCase):
         self.assertIn("dummy", ids)
         self.assertIn("actor", ids)
         self.assertIn("carrier", ids)
+        self.assertIn("logic", ids)
 
     def test_meta_has_name_and_version(self):
         meta = self.manager.meta("dummy")
@@ -469,13 +504,13 @@ class ConfigDrivenTests(unittest.TestCase):
         self.engine.modules = self.manager
 
     def test_declared_defaults_auto_filled_on_discover(self):
+        # 声明的常规键自动补齐;映射表时代的 mappings/outputs 即便声明了
+        # 也被清除（事件流是唯一数据面，配置里确保无此项）
         osc = self.manager.settings_for("actor")
         self.assertIn("rate_hz", osc)
-        self.assertIn("mappings", osc)
-        self.assertIn("outputs", osc)
         self.assertEqual(osc["rate_hz"], 10)
-        self.assertEqual(osc["mappings"], [])
-        self.assertEqual(osc["outputs"], [])
+        self.assertNotIn("mappings", osc)
+        self.assertNotIn("outputs", osc)
         path = os.path.join(self.manager.config_dir, "osc.json")
         self.assertTrue(os.path.isfile(path))
 
@@ -667,6 +702,180 @@ class GameModTests(unittest.TestCase):
             found[0], "BepInEx", "plugins", "AliceInCradleLink",
             "AliceInCradleLink.dll")))
         self.assertTrue(os.path.isfile(os.path.join(found[0], "winhttp.dll")))
+
+
+class EventTempInterfaceTests(unittest.TestCase):
+    """事件流/临时变量接口：META temps 声明、宿主装载、ctx 读写、事件动作。"""
+
+    def setUp(self):
+        self._roots = _FixtureRoots()
+        self._roots.__enter__()
+        self.addCleanup(self._roots.__exit__, None, None, None)
+        self.engine = _FakeEngine()
+        self.manager = PluginManager(self.engine)
+        self.engine.modules = self.manager
+
+    def _load(self):
+        inst = self.manager.load("logic")
+        self.manager.apply_logic_tables("logic")
+        return inst
+
+    def test_meta_temps_flow_through(self):
+        meta = self.manager.meta("logic")
+        self.assertEqual(meta["temps"],
+                         [{"key": "count", "label": "计数",
+                           "desc": "节拍计数"}])
+        self.assertEqual([s["key"] for s in self.manager.temp_specs_for("logic")],
+                         ["count"])
+
+    def test_temp_specs_instance_overrides_meta(self):
+        inst = self.manager.load("logic")
+        inst.temp_specs = lambda: [{"key": "custom", "label": "自定义"}]
+        self.assertEqual([s["key"] for s in self.manager.temp_specs_for("logic")],
+                         ["custom"])
+
+    def test_apply_logic_tables_feeds_engine(self):
+        inst = self._load()
+        cfg = self.manager.settings_for("logic")
+        cfg["temps"] = [{"name": "count", "expr": "{count}+1"}]
+        cfg["events"] = [{"name": "拍", "trigger": "period", "arg": 100,
+                          "actions": [{"dir": "in", "param": "in_fire",
+                                       "var": "count"}]}]
+        self.manager.apply_logic_tables("logic")
+        self.assertEqual(inst.engine._temp_table,
+                         [{"name": "count", "expr": "{count}+1"}])
+        self.assertEqual([c["name"] for c in inst.engine._cards], ["拍"])
+        # 临时变量空间与引擎共享：装载求值 count=1，事件动作引用它
+        inst.engine.tick_event_cards(0.0)
+        self.assertEqual(inst.sent, [("in_fire", 1)])
+        self.assertEqual(self.manager.get_temp("logic", "count"), 1.0)
+
+    def test_ctx_temp_read_write(self):
+        inst = self._load()
+        inst.ctx.set_temp("x", 5)
+        self.assertEqual(inst.ctx.get_temp("x"), 5.0)
+        self.assertEqual(self.manager.get_temp("logic", "x"), 5.0)
+        self.assertEqual(inst.ctx.get_temp("missing", 3), 3.0)
+
+    def test_load_resets_temps_space(self):
+        self.manager.set_temp("logic", "x", 1)
+        self.assertEqual(self.manager.get_temp("logic", "x"), 1.0)
+        self.manager.load("logic")           # （重新）装载 = 临时变量空间清零
+        self.assertEqual(self.manager.temps_space("logic"), {})
+
+
+class LegacyPurgeTests(unittest.TestCase):
+    """映射表时代设置项的彻底清除（用户指示：不迁移，事件流是唯一数据面）。"""
+
+    def setUp(self):
+        self._roots = _FixtureRoots()
+        self._roots.__enter__()
+        self.addCleanup(self._roots.__exit__, None, None, None)
+        self.engine = _FakeEngine()
+        self.manager = PluginManager(self.engine)
+        self.engine.modules = self.manager
+
+    def test_mappings_and_outputs_keys_removed(self):
+        cfg = self.manager.settings_for("logic")
+        cfg["mappings"] = [
+            {"param": "in_strength_a", "expr": "{HPmax}/4 - {HP}/4"},
+            {"param": "in_fire", "expr": "{Orgasming}"},
+        ]
+        cfg["outputs"] = [
+            {"param": "COYOTE.Battery", "name": "Battery",
+             "expr": "{COYOTE.Battery}", "type": "Int"},
+        ]
+        cfg["temps"] = [{"name": "HLost", "expr": "{HPmax} - {HP}"}]
+        cfg["events"] = [{"name": "帧事件流", "trigger": "if",
+                          "arg": "{Hurt} > 0", "actions": []}]
+        self.manager._purge_legacy_tables("logic", cfg)
+        # 键整体删除（不是置空）：配置列表确保无此项
+        self.assertNotIn("mappings", cfg)
+        self.assertNotIn("outputs", cfg)
+        # 用户自建事件流配置原样保留，不转换
+        self.assertEqual(cfg["temps"],
+                         [{"name": "HLost", "expr": "{HPmax} - {HP}"}])
+        self.assertEqual([e["name"] for e in cfg["events"]], ["帧事件流"])
+        self.assertTrue(any("清除遗留" in m for m in self.engine._logs))
+
+    def test_keys_removed_even_when_empty(self):
+        # 模块声明默认补齐的空键也洗掉,确保配置列表无此项
+        cfg = self.manager.settings_for("logic")
+        cfg["mappings"] = []
+        cfg["outputs"] = []
+        self.manager._purge_legacy_tables("logic", cfg)
+        self.assertNotIn("mappings", cfg)
+        self.assertNotIn("outputs", cfg)
+
+    def test_first_generation_migration_artifacts_cleaned(self):
+        # 早期自动迁移的产物（输入映射（迁移）卡片 + map_* 临时行）一并清除,
+        # 用户自建事件流引用的变量不受影响
+        cfg = self.manager.settings_for("logic")
+        cfg.pop("mappings", None)
+        cfg.pop("outputs", None)
+        cfg["temps"] = [{"name": "HLost", "expr": "{HPmax} - {HP}"},
+                        {"name": "map_in_strength_a",
+                         "expr": "{HPmax}/4 - {HP}/4"}]
+        cfg["events"] = [
+            {"name": "输入映射（迁移）", "trigger": "period", "arg": 50,
+             "actions": [{"dir": "in", "param": "in_strength_a",
+                          "var": "map_in_strength_a"}]},
+            {"name": "帧事件流", "trigger": "if", "arg": "{Hurt} > 0",
+             "actions": [{"dir": "in", "param": "in_strength_b",
+                          "var": "HLost"}]},
+        ]
+        self.manager._purge_legacy_tables("logic", cfg)
+        self.assertNotIn("mappings", cfg)
+        self.assertEqual([e["name"] for e in cfg["events"]], ["帧事件流"])
+        self.assertEqual([t["name"] for t in cfg["temps"]], ["HLost"])
+        # 幂等
+        before = json.dumps(cfg, ensure_ascii=False, default=str)
+        self.manager._purge_legacy_tables("logic", cfg)
+        self.assertEqual(json.dumps(cfg, ensure_ascii=False, default=str),
+                         before)
+
+    def test_stale_event_actions_purged(self):
+        # 引用已下线核心参数（如瞬时脉冲 in_zap_*）的事件动作被清除
+        cfg = self.manager.settings_for("logic")
+        cfg["events"] = [{"name": "拍", "trigger": "period", "arg": 50,
+                          "actions": [
+                              {"dir": "in", "param": "in_zap_a", "var": "x"},
+                              {"dir": "in", "param": "in_fire", "var": "x"},
+                              {"dir": "out", "param": "COYOTE.Battery",
+                               "var": "bat", "name": "Battery",
+                               "type": "Int"}]}]
+        self.manager._purge_stale_event_actions("logic", cfg)
+        kept = cfg["events"][0]["actions"]
+        # in_zap_a 清除;in_fire 保留;输出动作不在清洗范围
+        self.assertEqual([(a["dir"], a["param"]) for a in kept],
+                         [("in", "in_fire"), ("out", "COYOTE.Battery")])
+        self.assertTrue(any("已下线核心参数" in m
+                            for m in self.engine._logs))
+
+    def test_dashboard_filters_unused_signals(self):
+        # 主页输入数据值只显示被事件流/临时变量引用的参数
+        from ui.live import input_value_rows
+        inst = self.manager.load("logic")
+        cfg = self.manager.settings_for("logic")
+        cfg["temps"] = [{"name": "HLost", "expr": "{HPmax} - {HP}"}]
+        cfg["events"] = [{"name": "拍", "trigger": "period", "arg": 50,
+                          "actions": [{"dir": "in", "param": "in_fire",
+                                       "var": "Orgasming"}]}]
+        self.manager.apply_logic_tables("logic")
+        inst.engine.signal("HP", 60)
+        inst.engine.signal("Heal", 5)            # 未被引用 → 不上表
+        inst.engine.signal("Orgasming", 1)       # 被动作引用 → 上表
+
+        class _State:
+            slots = {}
+
+        rows = input_value_rows(self.engine, _State())
+        shown = {r["name"] for r in rows}
+        self.assertIn("Orgasming", shown)
+        self.assertIn("HP", shown)               # 临时变量表达式引用
+        self.assertIn("HLost", shown)            # 临时变量本身
+        self.assertNotIn("Heal", shown)
+        self.assertNotIn("HPmax", shown)         # 被引用但从未收到数据 → 无行
 
 
 if __name__ == "__main__":
