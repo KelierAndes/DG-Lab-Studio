@@ -1,4 +1,4 @@
-# DGStudio — DG-Lab × VRChat OSC 控制台
+# DGStudio — DG-Lab × Everything 控制台
 
 **DGStudio** 是基于 **Python + WinUI 3** 的 DG-Lab（郊狼 Coyote / 负鼠 OVC / 灵猫 BMTR）控制台，采用**模块化架构**：软件主体只包含核心（设备连接与参数模型），对外联动（VRChat OSC、Alice in Cradle 等）以**联动模块**形式提供，在「模块」页按需下载、实时装卸、热重载。
 
