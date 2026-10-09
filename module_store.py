@@ -103,6 +103,40 @@ def requirement_satisfied(req: str, extra_dirs: tuple[str, ...] = ()) -> bool:
     return False
 
 
+def _running_abi() -> str:
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
+def _ext_abi_tag(name: str) -> str:
+    match = re.match(r".+\.(cp\d+)-win_amd64\.(?:pyd|lib)$", name)
+    return match.group(1) if match else ""
+
+
+def deps_abi_ok(deps_dir: str) -> bool:
+    """_deps 里的二进制扩展必须与运行中解释器同 ABI：内置 Python 升级后必须整目录重装。"""
+    want = _running_abi()
+    if not want or not deps_dir or not os.path.isdir(deps_dir):
+        return True
+    for _root, _dirs, files in os.walk(deps_dir):
+        for name in files:
+            tag = _ext_abi_tag(name)
+            if tag and tag != want:
+                return False
+    return True
+
+
+def wheel_abi_ok(filename: str) -> bool:
+    """随包 wheel 与当前解释器的 ABI 是否兼容（abi3 / 纯 Python 恒兼容）。"""
+    parts = os.path.basename(filename)[:-4].split("-")
+    if len(parts) < 3 or not filename.endswith(".whl"):
+        return True
+    py_tag, abi_tag = parts[-3], parts[-2]
+    if abi_tag in ("none", "abi3"):
+        return True
+    running = _running_abi()
+    return py_tag == running and abi_tag == running
+
+
 def _embedded_python_dir() -> str:
     if not getattr(sys, "frozen", False):
         return ""
@@ -124,10 +158,13 @@ def _run_pip(cmd: list[str], env: dict) -> tuple[bool, str]:
 
 
 def pip_install(requirements: list[str], target: str | None = None,
-                *, log=None) -> tuple[bool, str]:
-    groups = [([r for r in requirements if not r.startswith("!")], []),
-              ([r[1:].strip() for r in requirements if r.startswith("!")],
-               ["--no-deps"])]
+                *, log=None, optional: bool = False) -> tuple[bool, str]:
+    if optional:
+        groups = [(list(requirements), ["--no-deps"])]
+    else:
+        groups = [([r for r in requirements if not r.startswith("!")], []),
+                  ([r[1:].strip() for r in requirements if r.startswith("!")],
+                   ["--no-deps"])]
     outputs: list[str] = []
     ok_all = True
     for reqs, flags in groups:
@@ -488,6 +525,8 @@ class ModuleStore:
         requirements, _source = self.requirements_of(module_id)
         frozen = getattr(sys, "frozen", False)
         deps = self.deps_dir(module_id)
+        if frozen and deps and os.path.isdir(deps) and not deps_abi_ok(deps):
+            return [req for req in requirements if not req.startswith("!")]
         extra = (deps,) if frozen and deps and os.path.isdir(deps) else ()
         return [req for req in requirements if not req.startswith("!")
                 and not requirement_satisfied(req, extra)]
@@ -516,10 +555,19 @@ class ModuleStore:
         wheels = self.wheels_dir(module_id)
         if not wheels:
             return
+        names = [name for name in sorted(os.listdir(wheels))
+                 if name.endswith(".whl")]
+        stale = [name for name in names if not wheel_abi_ok(name)]
+        if stale:
+            # 自带 wheel 与当前内置 Python ABI 不符时整体不用：只合并一部分会让
+            # 「已安装」判定提前成立，其依赖（如 opencv 的 numpy）永远不会装
+            if log is not None:
+                log(f"[deps] 自带 wheel 中有 {len(stale)} 个与当前内置 Python"
+                    f"（{_running_abi()}）ABI 不符，本次忽略全部自带 wheel、"
+                    "改从网络安装（涉及：" + "、".join(stale) + "）")
+            return
         merged = 0
-        for name in sorted(os.listdir(wheels)):
-            if not name.endswith(".whl"):
-                continue
+        for name in names:
             try:
                 merged += bool(self._merge_wheel(os.path.join(wheels, name),
                                                  deps))
@@ -538,6 +586,22 @@ class ModuleStore:
         deps = self.deps_dir(module_id)
         extra: tuple[str, ...] = ()
         if frozen and deps:
+            if os.path.isdir(deps) and not deps_abi_ok(deps):
+                stale = deps + ".old"
+                try:
+                    if os.path.isdir(stale):
+                        shutil.rmtree(stale, ignore_errors=True)
+                    os.rename(deps, stale)
+                except OSError as exc:
+                    if log is not None:
+                        log(f"[deps] 旧依赖隔离失败（模块可能正在运行，"
+                            f"请先停止再试）: {exc}")
+                    still = [req for req in requirements
+                             if not req.startswith("!")]
+                    return False, still, f"deps ABI mismatch: {exc}"
+                if log is not None:
+                    log(f"[deps] 依赖二进制与当前内置 Python（{_running_abi()}）"
+                        "ABI 不符，已隔离旧依赖并重新安装")
             os.makedirs(deps, exist_ok=True)
             self._merge_bundled_wheels(module_id, deps, log=log)
             extra = (deps,)
@@ -545,9 +609,19 @@ class ModuleStore:
                    if not requirement_satisfied(req, extra)]
         if not missing:
             return True, [], ""
+        target = deps if frozen else None
+        required_missing = [req for req in missing if not req.startswith("!")]
+        optional_missing = [req[1:].strip() for req in missing
+                            if req.startswith("!")]
+        ok, out = pip_install(required_missing, target, log=log)
+        if optional_missing:
+            ok_opt, out_opt = pip_install(optional_missing, target, log=log,
+                                          optional=True)
+            out = "\n".join(part for part in (out, out_opt) if part)
+            if not ok_opt and log is not None:
+                log("[deps] 可选依赖安装失败（不影响模块运行，仅对应增强功能不可用）")
         if frozen:
             extra = (deps,)
-        ok, out = pip_install(missing, deps if frozen else None, log=log)
-        still = [req for req in missing if not req.startswith("!") and
-                 not requirement_satisfied(req, extra)]
+        still = [req for req in required_missing
+                 if not requirement_satisfied(req, extra)]
         return (ok and not still), still, out

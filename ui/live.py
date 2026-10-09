@@ -216,7 +216,7 @@ def osc_probe_card(engine) -> dict:
     label = "OSC 探测"
     if not running:
         return {"value": "已停止", "unit": "", "label": label, "symbol": "Sync",
-                "accent": False, "detail": ["桥接未运行", "联动页可开启"]}
+                "accent": False, "detail": ["桥接未运行", "模块页可开启"]}
     last = getattr(osc, "last_rx", None)
     in_port = 9001
     try:
@@ -234,45 +234,10 @@ def osc_probe_card(engine) -> dict:
             "detail": [f"监听 :{in_port}", "未收到数据"]}
 
 
-def _osc_module_active(engine) -> bool:
-    try:
-        for module_id, _name, eng, runtime in module_engines(engine):
-            if module_id == "osc_bridge" \
-                    and getattr(runtime, "_running", False) \
-                    and (eng.mappings or eng.outputs):
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _osc_bridge_running(engine) -> bool:
-    try:
-        for module_id, _name, _eng, runtime in module_engines(engine):
-            if module_id == "osc_bridge" \
-                    and getattr(runtime, "_running", False):
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _osc_module_installed(engine) -> bool:
-    try:
-        return any(m["id"] == "osc_bridge" and m.get("enabled")
-                   for m in engine.modules.list_modules())
-    except Exception:
-        return False
-
-
 def link_counts(engine, state: EngineState) -> dict:
-    osc_module = _osc_module_active(engine)
-    osc_on = _osc_bridge_running(engine) and not osc_module
+    """链路计数：设备 / 服务链路 + 各联动模块的映射条目（OSC 归联动模块）。"""
     inputs: list[tuple[str, str]] = []
     outputs: list[tuple[str, str]] = []
-    if osc_on:
-        inputs.append(("VRChat OSC 输入", "头像参数 → 设备控制"))
-        outputs.append(("VRChat OSC 输出", "设备数值 → 头像参数"))
     try:
         bindings = engine.ovc_bindings()
         profile = engine.config.get("ble", {}).get("ovc_profile", "")
@@ -288,14 +253,27 @@ def link_counts(engine, state: EngineState) -> dict:
             inputs.append((f"{name} 传感", "气压 / 边缘状态遥测"))
         elif slot.is_output_device:
             outputs.append((name, "强度 / 波形下发"))
-    for _module_id, module_name, eng, _rt in module_engines(engine):
-        if eng.mappings:
-            inputs.append((f"{module_name} · 模块→核心",
-                           f"输入映射 {len(eng.mappings)} 条"))
-        if eng.outputs:
+    for module_id, module_name, eng, _rt in module_engines(engine):
+        inputs.append((f"{module_name} · 模块→核心",
+                       f"登记变量 {len(_signal_names(eng))} 个"))
+        write_in = len(_writable_params(engine, module_id))
+        if write_in:
             outputs.append((f"{module_name} · 核心→模块",
-                            f"输出映射 {len(eng.outputs)} 条"))
+                            f"回传参数 {write_in} 个"))
     return {"input": inputs, "output": outputs}
+
+
+def _signal_names(eng) -> list[str]:
+    return [str(name) for name in (getattr(eng, "signals", None) or {})]
+
+
+def _writable_params(engine, module_id: str) -> list[str]:
+    """事件流宿主里该模块登记的可回传参数（dir 含 out）。"""
+    declared = getattr(getattr(engine, "flow", None), "runtime", None)
+    rows = getattr(declared, "declared_vars", None) or []
+    return [str(row.get("name") or "") for row in rows
+            if str(row.get("mid") or "") == str(module_id)
+            and str(row.get("dir") or "") in ("out", "inout")]
 
 
 def module_engines(engine) -> list[tuple[str, str, object, object]]:
@@ -326,28 +304,27 @@ def _runtime_fresh(runtime) -> bool:
 
 
 def module_channel_rows(engine) -> list[dict]:
+    """联动链路：模块登记的变量数与是否有数据流过（映射表已退役，改看变量）。"""
     rows: list[dict] = []
     for module_id, module_name, eng, runtime in module_engines(engine):
         errors = getattr(eng, "errors", {}) or {}
         out_errors = getattr(eng, "out_errors", {}) or {}
         fresh = _runtime_fresh(runtime)
-        mappings = len(getattr(eng, "mappings", {}) or {})
-        outs = len(getattr(eng, "outputs", {}) or {})
-        if module_id != "osc_bridge" or mappings:
-            detail = next(iter(errors.values()), "")
-            rows.append({"module": module_name, "direction": "模块→核心",
-                         "count": mappings,
-                         "probe": "异常" if errors else
-                                  ("数据流动中" if fresh else
-                                   ("未配置映射" if not mappings
-                                    else "等待数据")),
-                         "probe_detail": detail,
-                         "probe_ok": False if errors else
-                                     (True if fresh else None)})
+        signals = _signal_names(eng)
+        detail = next(iter(errors.values()), "")
+        rows.append({"module": module_name, "direction": "模块→核心",
+                     "count": len(signals),
+                     "probe": "异常" if errors else
+                              ("数据流动中" if fresh else
+                               ("未登记变量" if not signals else "等待数据")),
+                     "probe_detail": detail,
+                     "probe_ok": False if errors else
+                                 (True if fresh else None)})
+        outs = _writable_params(engine, module_id)
         if outs:
             detail = next(iter(out_errors.values()), "")
             rows.append({"module": module_name, "direction": "核心→模块",
-                         "count": outs,
+                         "count": len(outs),
                          "probe": "异常" if out_errors else
                                   ("回传中" if fresh else "等待回传"),
                          "probe_detail": detail,
@@ -415,16 +392,8 @@ def module_data_sig(engine) -> tuple:
 
 
 def input_channel_rows(engine, state: EngineState) -> list[dict]:
-    show_osc_entry = _osc_module_installed(engine) and not _osc_module_active(engine)
-    osc_on = _osc_bridge_running(engine)
+    """设备 / 服务类输入链路：OSC 桥属于联动模块，不在这里列（见 module_channel_rows）。"""
     rows = []
-    if show_osc_entry:
-        rows.append({
-            "name": "VRChat OSC 输入",
-            "detail": "头像参数 → 首个同类型设备（强度/波形/开火/急停）",
-            "enabled": osc_on,
-            "hint": "" if osc_on else "在模块页或联动页开启 VRChat OSC 联动",
-        })
     try:
         bindings = engine.ovc_bindings()
         profile = engine.config.get("ble", {}).get("ovc_profile", "")
@@ -448,14 +417,13 @@ def input_channel_rows(engine, state: EngineState) -> list[dict]:
             })
     running = {module_id for module_id, _n, _e, _rt in module_engines(engine)}
     for meta in _linkage_modules(engine):
-        if (meta["id"] == "osc_bridge" or meta["id"] in running
-                or not meta.get("enabled")):
+        if meta["id"] in running or not meta.get("enabled"):
             continue
         rows.append({
             "name": str(meta["name"]),
             "detail": "联动模块输入通道（模块 → 核心）",
             "enabled": False,
-            "hint": "在模块页或联动页启动该模块",
+            "hint": "在模块页启动该模块",
         })
     return rows
 
@@ -491,104 +459,5 @@ def output_channel_rows(state: EngineState) -> list[dict]:
                 "percent": out["percent"],
                 "alive": status in (0, 2),
                 "alive_text": channel_alive_text(status),
-            })
-    return rows
-
-
-def _input_value_text(value) -> str:
-    if isinstance(value, bool):
-        return "True" if value else "False"
-    if isinstance(value, float):
-        return f"{value:.2f}".rstrip("0").rstrip(".")
-    return str(value)
-
-
-def _used_stream_vars(engine, module_id: str) -> set[str]:
-    used: set[str] = set()
-    try:
-        cfg = engine.modules.settings_for(module_id)
-    except Exception:
-        return used
-    for card in (cfg.get("events") or []):
-        if not isinstance(card, dict):
-            continue
-        for act in (card.get("actions") or []):
-            if isinstance(act, dict):
-                if act.get("var"):
-                    used.add(str(act["var"]))
-                if act.get("param"):
-                    used.add(str(act["param"]))
-        trigger = str(card.get("trigger") or "")
-        arg = card.get("arg")
-        if trigger == "change" and arg:
-            used.add(str(arg))
-        if trigger == "if" and arg:
-            used |= set(expr.variables(str(arg)))
-    for row in (cfg.get("temps") or []):
-        if isinstance(row, dict):
-            if row.get("name"):
-                used.add(str(row["name"]))
-            used |= set(expr.variables(str(row.get("expr") or "")))
-    return used
-
-
-def input_value_rows(engine, state: EngineState) -> list[dict]:
-    rows: list[dict] = []
-    for module_id, module_name, eng, _rt in module_engines(engine):
-        used = _used_stream_vars(engine, module_id)
-        for name in sorted(getattr(eng, "signals", {}) or {}):
-            if name not in used:
-                continue
-            rows.append({"name": name, "kind": module_name,
-                         "value": _input_value_text(eng.signals[name]),
-                         "age": "实时"})
-        for name in sorted(getattr(eng, "temps", {}) or {}):
-            rows.append({"name": name, "kind": f"{module_name} · 临时变量",
-                         "value": _input_value_text(eng.temps[name]),
-                         "age": "实时"})
-    for sid in sorted(getattr(state, "slots", {}) or {}):
-        slot = state.slots[sid]
-        if family_of(slot.type) != "BMTR":
-            continue
-        pressure = slot.pressure if slot.pressure is not None else 0.0
-        rows.append({"name": f"{slot.name or slot.type or sid} Pressure",
-                     "kind": "传感器", "value": f"{pressure:.2f} kPa", "age": "实时"})
-        edge = slot.edge_state if slot.edge_state is not None else 0
-        rows.append({"name": f"{slot.name or slot.type or sid} EdgeState",
-                     "kind": "传感器", "value": EDGE_STATES.get(edge, str(edge)),
-                     "age": "实时"})
-    return rows
-
-
-def module_output_value_rows(engine) -> list[dict]:
-    rows: list[dict] = []
-    for _module_id, module_name, eng, _rt in module_engines(engine):
-        for name in sorted(getattr(eng, "out_values", {}) or {}):
-            spec = next((o for o in (eng.outputs or [])
-                         if str(o.get("name")) == name), None)
-            rows.append({"name": name, "kind": module_name,
-                         "value": _input_value_text(eng.out_values[name]),
-                         "age": str((spec or {}).get("type") or "")})
-    return rows
-
-
-def output_value_rows(engine, state: EngineState) -> list[dict]:
-    try:
-        waves = engine.wave_selection()
-    except Exception:
-        waves = {"A": SILENT, "B": SILENT}
-    rows: list[dict] = []
-    for sid in sorted(state.slots):
-        slot = state.slots[sid]
-        if not slot.is_output_device:
-            continue
-        name = slot.name or slot.type or sid
-        for ch in ("A", "B"):
-            out = output_row(slot, ch)
-            rows.append({
-                "name": f"{name} · {ch}",
-                "value": f"{out['value']}/{out['limit']}",
-                "percent": out["percent"],
-                "wave": wave_label(waves.get(ch, ""), family_of(slot.type)),
             })
     return rows

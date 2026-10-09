@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <Grid x:Name="RootLayout" Margin="24,12,24,20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <!-- Top Bar: Tabs, Search Box, Quick Actions -->
+    <Grid x:Name="TopBarHost" Grid.Row="0" Margin="0,0,0,12" />
+
+    <!-- Blueprint Canvas Host (Direct2D CanvasControl + XAML Card Canvas) -->
+    <Grid x:Name="CanvasHost" Grid.Row="1" />
+  </Grid>
+</Page>

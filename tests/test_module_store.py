@@ -12,8 +12,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import module_store
 from module_store import (ModuleStore, _embedded_python_dir,
-                          parse_requirements_text, requirement_name,
-                          requirement_satisfied, version_key, pip_install)
+                          deps_abi_ok, parse_requirements_text,
+                          requirement_name, requirement_satisfied, version_key,
+                          wheel_abi_ok, pip_install)
 from plugins import PluginManager, _CLEANUP_MARKER
 from types import SimpleNamespace
 
@@ -264,6 +265,129 @@ class EmbeddedPythonTests(unittest.TestCase):
             ok, still, _out = manager.store.ensure_dependencies("sample")
         self.assertTrue(ok)
         self.assertEqual(still, [])
+
+
+class DepsAbiTests(unittest.TestCase):
+    RUNNING = f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+    def test_deps_abi_detects_foreign_cp_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(deps_abi_ok(tmp))
+            self.assertTrue(deps_abi_ok(os.path.join(tmp, "missing")))
+            foreign = f"x.cp{99}-win_amd64.pyd"
+            if foreign == f"x.{self.RUNNING}-win_amd64.pyd":
+                foreign = f"x.cp312-win_amd64.pyd" if self.RUNNING != "cp312" \
+                    else "x.cp311-win_amd64.pyd"
+            with open(os.path.join(tmp, foreign), "w", encoding="utf-8") as f:
+                f.write("")
+            self.assertFalse(deps_abi_ok(tmp))
+
+    def test_deps_abi_accepts_matching_and_untagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, f"m.{self.RUNNING}-win_amd64.pyd"), "w",
+                      encoding="utf-8") as f:
+                f.write("")
+            with open(os.path.join(tmp, "plain.pyd"), "w",
+                      encoding="utf-8") as f:
+                f.write("")
+            self.assertTrue(deps_abi_ok(tmp))
+
+    def test_wheel_abi_rules(self):
+        self.assertTrue(wheel_abi_ok("six-1.17.0-py2.py3-none-any.whl"))
+        self.assertTrue(wheel_abi_ok(
+            "opencv_python_headless-5.0.0.93-cp37-abi3-win_amd64.whl"))
+        self.assertTrue(wheel_abi_ok(
+            f"numpy-2.5.3-{self.RUNNING}-{self.RUNNING}-win_amd64.whl"))
+        foreign = "cp312" if self.RUNNING != "cp312" else "cp311"
+        self.assertFalse(wheel_abi_ok(
+            f"numpy-2.5.3-{foreign}-{foreign}-win_amd64.whl"))
+
+    def test_frozen_ensure_quarantines_stale_abi_deps(self):
+        base = tempfile.mkdtemp(prefix="dgstudio_embedpy_")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        _stage_runtime(base)
+        modules_root = tempfile.mkdtemp(prefix="dgstudio_deps_")
+        self.addCleanup(shutil.rmtree, modules_root, ignore_errors=True)
+        patcher = unittest.mock.patch("plugins.module_roots",
+                                      return_value=[modules_root])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        engine = _FakeEngine()
+        manager = PluginManager(engine)
+        engine.modules = manager
+        module_dir = os.path.join(modules_root, "sample")
+        os.makedirs(module_dir)
+        with open(os.path.join(module_dir, "plugin.py"), "w",
+                  encoding="utf-8") as f:
+            f.write('META = {"id": "sample", "version": "1.0.0"}\n')
+        with open(os.path.join(module_dir, "requirements.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write("dgstudio-definitely-not-a-package>=1.0\n")
+        manager.discover()
+        deps = manager.store.deps_dir("sample")
+        os.makedirs(deps)
+        stale_name = ("x.cp312-win_amd64.pyd" if self.RUNNING != "cp312"
+                      else "x.cp311-win_amd64.pyd")
+        with open(os.path.join(deps, stale_name), "w", encoding="utf-8") as f:
+            f.write("stale")
+
+        def fake_pip(cmd, **_kwargs):
+            target = cmd[cmd.index("--target") + 1]
+            info = os.path.join(
+                target, "dgstudio_definitely_not_a_package-1.0.dist-info")
+            os.makedirs(info)
+            with open(os.path.join(info, "METADATA"), "w",
+                      encoding="utf-8") as f:
+                f.write("Metadata-Version: 2.1\n"
+                        "Name: dgstudio-definitely-not-a-package\n"
+                        "Version: 1.0\n")
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        logs: list[str] = []
+        with unittest.mock.patch.object(sys, "frozen", True, create=True), \
+                _frozen_exe(base), \
+                unittest.mock.patch.object(module_store.subprocess, "run",
+                                           fake_pip):
+            ok, still, _out = manager.store.ensure_dependencies(
+                "sample", log=logs.append)
+        self.assertTrue(ok)
+        self.assertEqual(still, [])
+        self.assertTrue(any("ABI" in line for line in logs))
+        self.assertTrue(os.path.isfile(os.path.join(deps + ".old", stale_name)))
+        self.assertTrue(os.path.isfile(
+            os.path.join(deps, "dgstudio_definitely_not_a_package-1.0.dist-info",
+                         "METADATA")))
+
+    def test_missing_dependencies_reports_abi_mismatch(self):
+        base = tempfile.mkdtemp(prefix="dgstudio_embedpy_")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        _stage_runtime(base)
+        modules_root = tempfile.mkdtemp(prefix="dgstudio_deps_")
+        self.addCleanup(shutil.rmtree, modules_root, ignore_errors=True)
+        patcher = unittest.mock.patch("plugins.module_roots",
+                                      return_value=[modules_root])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        engine = _FakeEngine()
+        manager = PluginManager(engine)
+        engine.modules = manager
+        module_dir = os.path.join(modules_root, "sample")
+        os.makedirs(module_dir)
+        with open(os.path.join(module_dir, "plugin.py"), "w",
+                  encoding="utf-8") as f:
+            f.write('META = {"id": "sample", "version": "1.0.0"}\n')
+        with open(os.path.join(module_dir, "requirements.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write("dgstudio-definitely-not-a-package>=1.0\n")
+        manager.discover()
+        deps = manager.store.deps_dir("sample")
+        os.makedirs(deps)
+        stale_name = ("x.cp312-win_amd64.pyd" if self.RUNNING != "cp312"
+                      else "x.cp311-win_amd64.pyd")
+        with open(os.path.join(deps, stale_name), "w", encoding="utf-8") as f:
+            f.write("stale")
+        self.assertEqual(manager.store.missing_dependencies("sample"),
+                         ["dgstudio-definitely-not-a-package>=1.0"])
 
 
 class MarketParseTests(unittest.TestCase):

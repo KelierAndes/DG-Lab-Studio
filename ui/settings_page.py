@@ -7,6 +7,7 @@ from win32more.winui3 import XamlClass
 from ui import live, widgets as W
 from ui.paths import xaml
 from module_store import MIRROR_PRESETS, PROXY_PRESETS
+from dglab.version import APP_VERSION
 
 _GROUP_SYMBOLS = {
     "外观": "Highlight",
@@ -224,7 +225,7 @@ class SettingsPage(XamlClass, Page):
 
     def _group_about(self) -> object:
         rows = [
-            self._info_row("版本", "DGStudio", "2.1 (模块化)"),
+            self._info_row("版本", "DGStudio", APP_VERSION),
             self._info_row("运行时", "win32more / WinUI 3", "0.8+"),
             self._info_row("配置文件", "应用目录下 config.json",
                            self.shell.engine.config.path),

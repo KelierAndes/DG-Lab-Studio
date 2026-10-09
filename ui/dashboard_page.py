@@ -29,7 +29,6 @@ class DashboardPage(XamlClass, Page):
         state_sig = self._state_sig()
         mod_sig = live.module_data_sig(shell.engine)
         if state_sig == self._state_seen and mod_sig == self._mod_sig:
-            self._refresh_live_rows()
             return
         self.rebuild()
 
@@ -38,73 +37,6 @@ class DashboardPage(XamlClass, Page):
         return (st.backend,
                 tuple(sorted((sid, s.type) for sid, s in st.slots.items())))
 
-    def _refresh_live_rows(self) -> None:
-        engine, state = self.shell.engine, self.shell.state
-        lines = live.input_value_rows(engine, state)
-        if [(l["kind"], l["name"]) for l in lines] \
-                != list(self._input_value_tbs):
-            self.rebuild()
-            return
-        for line in lines:
-            tb = self._input_value_tbs[(line["kind"], line["name"])]
-            if tb.Text != line["value"]:
-                tb.Text = line["value"]
-
-        out_lines = live.output_value_rows(engine, state)
-        if [l["name"] for l in out_lines] != list(self._output_value_tbs):
-            self.rebuild()
-            return
-        for line in out_lines:
-            refs = self._output_value_tbs[line["name"]]
-            if refs["value"].Text != line["value"]:
-                refs["value"].Text = line["value"]
-            self._set_meter(refs["meter"], line["percent"], width=110)
-            if refs["wave"].Text != line["wave"]:
-                refs["wave"].Text = line["wave"]
-
-        m_lines = live.module_output_value_rows(engine)
-        if [(l["kind"], l["name"]) for l in m_lines] \
-                != list(self._module_value_tbs):
-            self.rebuild()
-            return
-        for line in m_lines:
-            tb = self._module_value_tbs[(line["kind"], line["name"])]
-            if tb.Text != line["value"]:
-                tb.Text = line["value"]
-
-        for sid, cells in self._device_cells.items():
-            slot = state.slots.get(sid)
-            if slot is None:
-                continue
-            if slot.is_output_device:
-                for ch in ("A", "B"):
-                    out = live.output_row(slot, ch)
-                    tb = cells.get(f"strength_{ch}")
-                    if tb is not None and tb.Text != f"{out['value']}/{out['limit']}":
-                        tb.Text = f"{out['value']}/{out['limit']}"
-                    meter = cells.get(f"strength_{ch}_meter")
-                    if meter is not None:
-                        self._set_meter(meter, out["percent"], width=54)
-            else:
-                pressure = slot.pressure
-                text = f"{pressure:.2f} kPa" if pressure is not None else "—"
-                tb = cells.get("pressure")
-                if tb is not None and tb.Text != text:
-                    tb.Text = text
-                meter = cells.get("pressure_meter")
-                if meter is not None:
-                    percent = max(0.0, min(1.0, (pressure or 0.0)
-                                           / live.PRESSURE_MAX_KPA)) * 100
-                    self._set_meter(meter, percent, width=54)
-            bat = slot.battery or 0
-            tb = cells.get("battery")
-            if tb is not None and tb.Text != live.battery_text(slot):
-                tb.Text = live.battery_text(slot)
-            meter = cells.get("battery_meter")
-            if meter is not None:
-                self._set_meter(meter, bat, width=54)
-
-    @staticmethod
     def _set_meter(meter, percent: float, *, width: float = 54) -> None:
         ratio = max(0.0, min(1.0, percent / 100.0))
         try:
@@ -129,14 +61,12 @@ class DashboardPage(XamlClass, Page):
         self._state_seen = self._state_sig()
         self._mod_sig = live.module_data_sig(shell.engine)
         self._last = time.monotonic()
-        self._input_value_tbs: dict = {}
-        self._output_value_tbs: dict = {}
         self._module_value_tbs: dict = {}
         self._device_cells: dict = {}
 
         W.page_head(
             self.HeadHost,
-            {"title": "概览", "subtitle": "设备统计、输入 / 输出链路与通道实时数据",
+            {"title": "概览", "subtitle": "设备统计、输入 / 输出链路与通道",
              "breadcrumb": ["控制台", "概览"]},
             actions=[
                 W.text_button("刷新", symbol="Refresh", on_click=lambda s, e: self.rebuild()),
@@ -147,8 +77,6 @@ class DashboardPage(XamlClass, Page):
         self._fill_stats()
         self.InputChannelsHost.Content = self._input_channels_card()
         self.OutputChannelsHost.Content = self._output_channels_card()
-        self.InputValuesHost.Content = self._input_values_card()
-        self.OutputValuesHost.Content = self._output_values_card()
 
         host = self.DevicesHost
         host.Children.Clear()
@@ -323,7 +251,7 @@ class DashboardPage(XamlClass, Page):
             "输入通道",
             "控制输入与遥测进入应用的链路（设备 / 服务 / 模块）",
             symbol="Download",
-            trailing=nav.link("联动设置", "link"),
+            trailing=nav.link("模块设置", "modules"),
         )
         body = W.stack(spacing=0)
         rows = live.input_channel_rows(self.shell.engine, self.shell.state)
@@ -373,7 +301,8 @@ class DashboardPage(XamlClass, Page):
         left = W.stack(spacing=2, v="center")
         left.Children.Append(W.text(f"{entry['module']} · {entry['direction']}",
                                     size=13, bold=W.SEMIBOLD, trimming=True))
-        detail = f"{entry['count']} 条映射 · 探活 {entry['probe']}"
+        unit = "个变量" if entry["direction"] == "模块→核心" else "个回传参数"
+        detail = f"{entry['count']} {unit} · 探活 {entry['probe']}"
         if entry.get("probe_detail"):
             detail += f"（{entry['probe_detail']}）"
         left.Children.Append(W.text(detail, size=11, color="text3",
@@ -429,36 +358,6 @@ class DashboardPage(XamlClass, Page):
                                        dot_color=fg), 2))
         return W.box(height=48, child=g, h="stretch")
 
-    def _input_values_card(self) -> object:
-        inner = self._card_frame(
-            "输入数据值",
-            "全部联动模块的输入信号与传感器实时数值",
-            symbol="Contact",
-            trailing=nav.link("参数映射", "link"),
-        )
-        table_head = W.grid(W.star(1.4), W.fixed(96), W.star(1), W.fixed(74))
-        gap = Thickness(12, 0, 0, 0)
-        for label, col in (("参数", 0), ("来源", 1), ("当前值", 2), ("时间", 3)):
-            cell = W.text(label, size=12, color="text3", margin=gap if col else None)
-            table_head.Children.Append(W.put(cell, col))
-        inner.Children.Append(table_head)
-        inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
-
-        rows = W.stack(spacing=0)
-        lines = live.input_value_rows(self.shell.engine, self.shell.state)
-        if not lines:
-            rows.Children.Append(W.box(height=36, child=W.text(
-                "（暂无输入数据：模块运行并收到数据后自动出现）",
-                size=12, color="text3", v="center")))
-        for i, line in enumerate(lines):
-            if i:
-                rows.Children.Append(W.divider())
-            row, tb = self._input_value_row(line)
-            rows.Children.Append(row)
-            self._input_value_tbs[(line["kind"], line["name"])] = tb
-        inner.Children.Append(rows)
-        return W.card(inner)
-
     def _input_value_row(self, line: dict) -> tuple:
         g = W.grid(W.star(1.4), W.fixed(96), W.star(1), W.fixed(74))
         gap = Thickness(12, 0, 0, 0)
@@ -472,55 +371,6 @@ class DashboardPage(XamlClass, Page):
         g.Children.Append(W.put(W.text(line["age"], size=11, color="text3",
                                        margin=gap, v="center"), 3))
         return W.box(height=34, child=g), value_tb
-
-    def _output_values_card(self) -> object:
-        inner = self._card_frame(
-            "输出数据值",
-            "设备输出通道的实时强度与波形",
-            symbol="Sync",
-            trailing=nav.link("参数映射", "link"),
-        )
-        table_head = W.grid(W.star(1.4), W.fixed(88), W.star(1), W.star(1))
-        gap = Thickness(12, 0, 0, 0)
-        for label, col in (("通道", 0), ("强度", 1), ("幅度", 2), ("波形", 3)):
-            cell = W.text(label, size=12, color="text3", margin=gap if col else None)
-            table_head.Children.Append(W.put(cell, col))
-        inner.Children.Append(table_head)
-        inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
-
-        rows = W.stack(spacing=0)
-        lines = live.output_value_rows(self.shell.engine, self.shell.state)
-        if not lines:
-            rows.Children.Append(W.box(height=36, child=W.text(
-                "（未接入输出设备）", size=12, color="text3", v="center")))
-        for i, line in enumerate(lines):
-            if i:
-                rows.Children.Append(W.divider())
-            row, refs = self._output_value_row(line)
-            rows.Children.Append(row)
-            self._output_value_tbs[line["name"]] = refs
-        inner.Children.Append(rows)
-
-        module_lines = live.module_output_value_rows(self.shell.engine)
-        if module_lines:
-            inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
-            inner.Children.Append(self._section_note("联动模块回传（核心 → 模块）"))
-            m_head = W.grid(W.star(1.4), W.fixed(96), W.star(1), W.fixed(74))
-            for label, col in (("字段", 0), ("来源", 1), ("当前值", 2), ("类型", 3)):
-                cell = W.text(label, size=12, color="text3",
-                              margin=gap if col else None)
-                m_head.Children.Append(W.put(cell, col))
-            inner.Children.Append(m_head)
-            inner.Children.Append(W.divider(margin=Thickness(0, 6, 0, 0)))
-            m_rows = W.stack(spacing=0)
-            for i, line in enumerate(module_lines):
-                if i:
-                    m_rows.Children.Append(W.divider())
-                row, tb = self._input_value_row(line)
-                m_rows.Children.Append(row)
-                self._module_value_tbs[(line["kind"], line["name"])] = tb
-            inner.Children.Append(m_rows)
-        return W.card(inner)
 
     def _output_value_row(self, line: dict) -> tuple:
         g = W.grid(W.star(1.4), W.fixed(88), W.star(1), W.star(1))

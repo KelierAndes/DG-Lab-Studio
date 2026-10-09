@@ -20,6 +20,8 @@ from dglab.expr import variables as expr_variables
 from dglab.mapping import as_number
 from dglab.params import input_specs
 
+_OUTPUT_GUARD_LOGGED: set[str] = set()
+
 
 def _base_dir() -> str:
     if getattr(sys, "frozen", False):
@@ -197,21 +199,20 @@ class ModuleContext:
         return int(slot.strength_limit.get(channel, 200)) if slot else 200
 
     def set_strength(self, channel: str, value: int, slot_id: str | None = None):
-        return self.engine.set_strength(channel, value, slot_id=slot_id)
+        return self._guard("set_strength")
 
     def add_strength(self, channel: str, delta: int, slot_id: str | None = None):
-        return self.engine.add_strength(channel, delta, slot_id=slot_id)
+        return self._guard("add_strength")
 
     def reset_strength(self, channel: str, slot_id: str | None = None):
-        return self.engine.reset_strength(channel, slot_id=slot_id)
+        return self._guard("reset_strength")
 
     def set_wave(self, channel: str, name: str, slot_id: str | None = None):
-        return self.engine.set_wave(channel, name, slot_id=slot_id)
+        return self._guard("set_wave")
 
     def push_pulse_stream(self, frequency: int, channel: str = "A", level: int = 100,
                           slot_id: str | None = None):
-        return self.engine.push_pulse_stream(frequency, channel, level=level,
-                                             slot_id=slot_id)
+        return self._guard("push_pulse_stream")
 
     def wave_order(self, family: str = "COYOTE") -> list[str]:
         from dglab.waves import wave_order
@@ -224,7 +225,7 @@ class ModuleContext:
         return self.engine.intensity_params(slot_id)
 
     def set_intensity_param(self, key: str, value, slot_id: str | None = None) -> None:
-        self.engine.set_intensity_param(key, value, slot_id=slot_id)
+        self._guard("set_intensity_param")
 
     def device_setting(self, slot_id: str | None, key: str):
         return self.engine.device_setting(slot_id, key)
@@ -234,20 +235,28 @@ class ModuleContext:
 
     def fire(self, slot_id: str | None = None, duration_s: float | None = None,
              channel: str | None = None):
-        return self.engine.fire(slot_id=slot_id, duration_s=duration_s,
-                                channel=channel)
+        return self._guard("fire")
 
     def fire_start(self, slot_id: str | None = None, channel: str | None = None):
-        return self.engine.fire_start(slot_id=slot_id, channel=channel)
+        return self._guard("fire_start")
 
     def fire_stop(self, slot_id: str | None = None, channel: str | None = None):
-        return self.engine.fire_stop(slot_id=slot_id, channel=channel)
+        return self._guard("fire_stop")
 
     def zap(self, channel: str, seconds: float = 1.0, slot_id: str | None = None):
-        return self.engine.zap(channel, seconds, slot_id=slot_id)
+        return self._guard("zap")
 
     def emergency_stop(self):
         return self.engine.emergency_stop()
+
+    def _guard(self, what: str):
+        """设备动作只能由事件流的写入卡片驱动：模块直写一律拦下并写日志。"""
+        key = f"{self.module_id}:{what}"
+        if key not in _OUTPUT_GUARD_LOGGED:
+            _OUTPUT_GUARD_LOGGED.add(key)
+            self.log(f"已拦截模块直写设备输出：{what}() —— 模块只登记变量，"
+                     "设备动作请在事件流里用写入卡片驱动")
+        return None
 
 
     def set_temp(self, key: str, value) -> None:
@@ -284,8 +293,7 @@ class PluginManager:
         self._ctxs: dict[str, ModuleContext] = {}
         self._button_actions: dict[str, ButtonAction] = {}
         self._settings_cache: dict[str, JsonDict] = {}
-        self._temps: dict[str, dict[str, float]] = {}
-        self._event_tasks: dict[str, Future] = {}
+        self._temps: dict[str, float] = {}
         main_dir = os.path.dirname(os.path.abspath(getattr(engine.config, "path",
                                                            _base_dir())))
         self.config_dir = os.path.join(main_dir, "config")
@@ -780,7 +788,7 @@ class PluginManager:
         self._ctxs[module_id] = ctx
         inst.on_load(ctx)
         self._instances[module_id] = inst
-        self._temps.pop(module_id, None)
+        self._drop_module_temps(module_id)
         if module_id in self._meta:
             self._meta[module_id]["loaded"] = True
         self._register_actions(module_id, inst)
@@ -794,8 +802,11 @@ class PluginManager:
                                 if action.owner != module_id}
 
     def _register_actions(self, module_id: str, inst: ModuleBase) -> None:
+        hook = getattr(inst, "button_actions", None)
+        if not callable(hook):
+            return
         try:
-            actions = inst.button_actions() or []
+            actions = hook() or []
         except Exception:
             self.engine._log(f"模块 {module_id} button_actions() 失败:\n"
                              f"{traceback.format_exc()}")
@@ -818,10 +829,9 @@ class PluginManager:
             inst.on_unload()
         except Exception:
             self.engine._log(f"模块 {module_id} 卸载清理失败:\n{traceback.format_exc()}")
+        self._drop_module_temps(module_id)
         self._instances.pop(module_id, None)
         self._ctxs.pop(module_id, None)
-        self._temps.pop(module_id, None)
-        self._cancel_event_stream(module_id)
         self._unregister_actions(module_id)
         if module_id in self._meta:
             self._meta[module_id]["loaded"] = False
@@ -851,7 +861,6 @@ class PluginManager:
     async def deactivate(self, module_id: str) -> None:
         self._unregister_actions(module_id)
         self.set_enabled(module_id, False)
-        self._cancel_event_stream(module_id)
         await self.stop(module_id)
         self.engine.events.emit("modules_changed", module_id)
 
@@ -863,9 +872,10 @@ class PluginManager:
 
     def temp_specs_for(self, module_id: str) -> list[dict]:
         inst = self._instances.get(module_id)
-        if inst is not None:
+        hook = getattr(inst, "temp_specs", None)
+        if callable(hook):
             try:
-                specs = inst.temp_specs()
+                specs = hook()
                 if specs:
                     return [dict(s) for s in specs if isinstance(s, dict)]
             except Exception:
@@ -874,57 +884,39 @@ class PluginManager:
         return [dict(s) for s in ((self._meta.get(module_id) or {})
                                   .get("temps") or [])]
 
-    def temps_space(self, module_id: str) -> dict[str, float]:
-        return self._temps.setdefault(module_id, {})
+    def temps_space(self, module_id: str = "") -> dict[str, float]:
+        """全局共享的临时变量表：事件流卡片与所有模块读写同一命名空间。"""
+        return self._temps
+
+    def _declared_temp_names(self, module_id: str) -> set[str]:
+        names: set[str] = set()
+        for spec in self.temp_specs_for(module_id):
+            for field in ("name", "key"):
+                value = str(spec.get(field) or "").strip()
+                if value:
+                    names.add(value)
+        return names
+
+    def _drop_module_temps(self, module_id: str) -> None:
+        for name in self._declared_temp_names(module_id):
+            self._temps.pop(name, None)
 
     def set_temp(self, module_id: str, key: str, value) -> None:
         num = as_number(value)
         if num is None:
             return
-        self.temps_space(module_id)[str(key)] = num
+        self._temps[str(key)] = num
         eng = self._mapping_engine(module_id)
         if eng is not None and getattr(eng, "temps", None) is not None:
             eng.pump()
 
     def get_temp(self, module_id: str, key: str, default: float = 0.0) -> float:
-        return float(self.temps_space(module_id).get(str(key), default))
+        return float(self._temps.get(str(key), default))
 
     def apply_logic_tables(self, module_id: str) -> None:
         eng = self._mapping_engine(module_id)
-        if eng is None or not hasattr(eng, "attach_temps"):
-            return
-        cfg = self.settings_for(module_id)
-        eng.attach_temps(self.temps_space(module_id))
-        eng.set_temp_rows(cfg.get("temps"))
-        eng.set_event_cards(cfg.get("events"))
-        self._ensure_event_stream(module_id)
-
-    def _ensure_event_stream(self, module_id: str) -> None:
-        if self._event_tasks.get(module_id) is not None:
-            return
-        eng = self._mapping_engine(module_id)
-        if eng is None or not hasattr(eng, "tick_event_cards") \
-                or not eng.has_events():
-            return
-        self._event_tasks[module_id] = self.engine.submit(
-            self._event_stream_loop(module_id))
-
-    def _cancel_event_stream(self, module_id: str) -> None:
-        task = self._event_tasks.pop(module_id, None)
-        if task is not None:
-            task.cancel()
-
-    async def _event_stream_loop(self, module_id: str) -> None:
-        import time as _time
-        try:
-            while True:
-                await asyncio.sleep(0.05)
-                eng = self._mapping_engine(module_id)
-                if eng is None or not hasattr(eng, "tick_event_cards"):
-                    return
-                eng.tick_event_cards(_time.monotonic())
-        except asyncio.CancelledError:
-            pass
+        if eng is not None and hasattr(eng, "attach_temps"):
+            eng.attach_temps(self.temps_space())
 
     async def reload(self, module_id: str) -> None:
         inst = self._instances.get(module_id)
@@ -952,15 +944,22 @@ class PluginManager:
 
         ok, still, output = await asyncio.to_thread(
             self.store.ensure_dependencies, module_id, log=_pip_log)
-        if still:
+        if still or not ok:
             tail = "\n".join(output.strip().splitlines()[-8:]) or output
-            raise RuntimeError(f"依赖安装失败（{'、'.join(still)}）\n{tail}")
+            names = "、".join(still) or "部分依赖安装命令失败"
+            raise RuntimeError(f"依赖安装失败（{names}）\n{tail}")
         self.engine._log(f"模块 {module_id} 依赖就绪")
 
     async def install(self, module_id: str) -> None:
         await self._ensure_dependencies(module_id)
         self.set_enabled(module_id, True)
         await self.start(module_id)
+
+    async def prepare(self, module_id: str) -> None:
+        """下载后自动装载但不启用：依赖就绪并加载实例，不 start、不置开机自启。"""
+        await self._ensure_dependencies(module_id)
+        self.set_enabled(module_id, False)
+        self.load(module_id)
 
     async def uninstall(self, module_id: str) -> None:
         self.set_enabled(module_id, False)

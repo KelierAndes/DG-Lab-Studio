@@ -430,7 +430,8 @@ class EnginePulseStreamTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await engine.push_pulse_stream(440, channel="A")
 
-    async def test_module_context_passthrough(self):
+    async def test_module_context_cannot_push_pulse(self):
+        """模块直写设备输出被核心拦下：只记日志，不发帧。"""
         import plugins as plugins_module
 
         backend = FakeEngineBackend()
@@ -440,10 +441,12 @@ class EnginePulseStreamTests(unittest.IsolatedAsyncioTestCase):
         class FakeModule:
             id = "m"
 
+        seen: list[str] = []
+        engine.events.on("log", seen.append)
         ctx = plugins_module.ModuleContext(engine, FakeModule())
-        await ctx.push_pulse_stream(500, channel="A", level=40)
-        self.assertEqual(len(backend.pushed), 1)
-        self.assertEqual(backend.pushed[0][2], pulse_frame(500, 40))
+        self.assertIsNone(ctx.push_pulse_stream(500, channel="A", level=40))
+        self.assertEqual(backend.pushed, [])
+        self.assertTrue(any("已拦截模块直写设备输出" in text for text in seen))
 
 
 if __name__ == "__main__":

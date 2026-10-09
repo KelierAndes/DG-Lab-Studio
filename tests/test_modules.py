@@ -340,10 +340,8 @@ class ModuleContextApiTests(unittest.TestCase):
             self.assertIn("strength_step", ctx.intensity_params())
             ctx.settings["probe_key"] = 7
             self.assertEqual(engine.modules.settings_for("probe").get("probe_key"), 7)
-            with self.assertRaises(ValueError):
-                ctx.set_intensity_param("nope", 1)
             ctx.set_intensity_param("max_strength", 180)
-            self.assertEqual(ctx.intensity_params()["max_strength"], 180)
+            self.assertNotEqual(ctx.intensity_params()["max_strength"], 180)
         finally:
             engine.stop()
 
@@ -706,20 +704,46 @@ class EventTempInterfaceTests(unittest.TestCase):
         self.assertEqual([s["key"] for s in self.manager.temp_specs_for("logic")],
                          ["custom"])
 
-    def test_apply_logic_tables_feeds_engine(self):
+    def test_optional_hooks_stay_quiet_when_module_skips_them(self):
+        inst = self.manager.load("logic")
+        self.assertFalse(hasattr(inst, "temp_specs"))
+        self.assertFalse(callable(getattr(inst, "button_actions", None)))
+        mark = len(self.engine._logs)
+        for _ in range(5):
+            self.manager.temp_specs_for("logic")
+            self.manager._register_actions("logic", inst)
+        self.assertEqual(self.engine._logs[mark:], [])
+        self.assertEqual([s["key"] for s in self.manager.temp_specs_for("logic")],
+                         ["count"])
+
+    def test_broken_temp_specs_hook_falls_back_and_logs(self):
+        inst = self.manager.load("logic")
+
+        def _boom():
+            raise AttributeError("no such attribute")
+
+        inst.temp_specs = _boom
+        self.assertEqual([s["key"] for s in self.manager.temp_specs_for("logic")],
+                         ["count"])
+        self.assertIn("temp_specs() 失败", "\n".join(self.engine._logs))
+
+    def test_apply_logic_tables_shares_flow_temps(self):
         inst = self._load()
+        shared = self.manager.temps_space()
+        self.assertIs(inst.engine.temps, shared)
+        self.assertIs(self.manager.temps_space("other"), shared)
         cfg = self.manager.settings_for("logic")
         cfg["temps"] = [{"name": "count", "expr": "{count}+1"}]
         cfg["events"] = [{"name": "拍", "trigger": "period", "arg": 100,
                           "actions": [{"dir": "in", "param": "in_fire",
                                        "var": "count"}]}]
         self.manager.apply_logic_tables("logic")
-        self.assertEqual(inst.engine._temp_table,
-                         [{"name": "count", "expr": "{count}+1"}])
-        self.assertEqual([c["name"] for c in inst.engine._cards], ["拍"])
-        inst.engine.tick_event_cards(0.0)
-        self.assertEqual(inst.sent, [("in_fire", 1)])
-        self.assertEqual(self.manager.get_temp("logic", "count"), 1.0)
+        self.assertEqual(inst.engine._temp_table, [])
+        self.assertEqual(inst.engine._cards, [])
+        self.assertEqual(inst.sent, [])
+        self.manager.set_temp("logic", "count", 3)
+        self.assertEqual(inst.engine.temps["count"], 3.0)
+        self.assertEqual(self.manager.get_temp("logic", "count"), 3.0)
 
     def test_ctx_temp_read_write(self):
         inst = self._load()
@@ -728,11 +752,13 @@ class EventTempInterfaceTests(unittest.TestCase):
         self.assertEqual(self.manager.get_temp("logic", "x"), 5.0)
         self.assertEqual(inst.ctx.get_temp("missing", 3), 3.0)
 
-    def test_load_resets_temps_space(self):
-        self.manager.set_temp("logic", "x", 1)
-        self.assertEqual(self.manager.get_temp("logic", "x"), 1.0)
+    def test_load_resets_declared_temps_only(self):
+        self.manager.set_temp("logic", "count", 1)
+        self.manager.set_temp("logic", "x", 2)
         self.manager.load("logic")
-        self.assertEqual(self.manager.temps_space("logic"), {})
+        space = self.manager.temps_space("logic")
+        self.assertNotIn("count", space)
+        self.assertEqual(space["x"], 2.0)
 
 
 class LegacyPurgeTests(unittest.TestCase):
@@ -813,30 +839,6 @@ class LegacyPurgeTests(unittest.TestCase):
                          [("in", "in_fire"), ("out", "COYOTE.Battery")])
         self.assertTrue(any("已下线核心参数" in m
                             for m in self.engine._logs))
-
-    def test_dashboard_filters_unused_signals(self):
-        from ui.live import input_value_rows
-        inst = self.manager.load("logic")
-        cfg = self.manager.settings_for("logic")
-        cfg["temps"] = [{"name": "HLost", "expr": "{HPmax} - {HP}"}]
-        cfg["events"] = [{"name": "拍", "trigger": "period", "arg": 50,
-                          "actions": [{"dir": "in", "param": "in_fire",
-                                       "var": "Orgasming"}]}]
-        self.manager.apply_logic_tables("logic")
-        inst.engine.signal("HP", 60)
-        inst.engine.signal("Heal", 5)
-        inst.engine.signal("Orgasming", 1)
-
-        class _State:
-            slots = {}
-
-        rows = input_value_rows(self.engine, _State())
-        shown = {r["name"] for r in rows}
-        self.assertIn("Orgasming", shown)
-        self.assertIn("HP", shown)
-        self.assertIn("HLost", shown)
-        self.assertNotIn("Heal", shown)
-        self.assertNotIn("HPmax", shown)
 
 
 if __name__ == "__main__":

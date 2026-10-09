@@ -13,7 +13,18 @@ INPUT_NAME_TEMPLATES = {
 }
 
 
+def _override(config: dict, param_key: str) -> str:
+    """变量表里改过名的参数：param_names = {参数键: 头像参数名}。"""
+    table = config.get("param_names") or {}
+    if not isinstance(table, dict):
+        return ""
+    return str(table.get(str(param_key)) or "").strip()
+
+
 def default_input_name(config: dict, param_key: str) -> str:
+    named = _override(config, param_key)
+    if named:
+        return named
     global_prefix = str(config.get("prefix") or "DGLab")
     prefixes = dict(config.get("device_prefixes") or {})
     for spec in core_inputs():
@@ -33,6 +44,9 @@ def default_input_name(config: dict, param_key: str) -> str:
 
 
 def default_output_name(config: dict, param_key: str) -> str:
+    named = _override(config, param_key)
+    if named:
+        return named
     if str(param_key) == "Action":
         return f"{config.get('prefix') or 'DGLab'}Action"
     spec = output_spec(param_key)

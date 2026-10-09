@@ -567,7 +567,7 @@ def suggest_box(*, text: str = "", choices=None, placeholder: str = "",
         if user_input:
             _fill()
         if on_commit is not None:
-            on_commit((sender.Text or "").strip())
+            on_commit((box.Text or "").strip())
 
     try:
         box.TextChanged += _text_changed
@@ -577,7 +577,7 @@ def suggest_box(*, text: str = "", choices=None, placeholder: str = "",
     if on_commit is not None:
         def _submitted(sender, args):
             _fill()
-            on_commit((sender.Text or "").strip())
+            on_commit((box.Text or "").strip())
 
         try:
             box.QuerySubmitted += _submitted

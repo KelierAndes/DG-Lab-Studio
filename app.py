@@ -25,6 +25,7 @@ from dglab.waves import (CONTINUOUS, COYOTE_WAVEFORMS, CoyoteWaveform,
                          PULSE_STREAM, SILENT, pulse_frame,
                          pulse_frame_vibration, resolve_wave_frames,
                          wave_order)
+from dglab.flow_host import FlowHost, migrate_module_flows
 from plugins import PluginManager
 
 
@@ -137,6 +138,7 @@ class Engine:
         }
         self.events.on("log", self._file_only)
         self.modules = PluginManager(self)
+        self.flow = FlowHost(self)
         self._modules_ready = False
         self.events.on("modules_changed", self._on_module_change)
         self.events.on("ovc_button", self._on_ovc_button)
@@ -155,6 +157,7 @@ class Engine:
             raise RuntimeError("engine loop failed to start")
         self.submit(self._reconnect_loop())
         self.submit(self._startup_modules())
+        self.flow.start()
 
     def _run_loop(self) -> None:
         if sys.platform == "win32":
@@ -182,6 +185,7 @@ class Engine:
             self._thread.join(timeout=3.0)
 
     async def shutdown(self) -> None:
+        self.flow.stop()
         try:
             await self._disconnect_backend()
         except Exception:
@@ -225,6 +229,7 @@ class Engine:
                 pass
             self._backend = None
         await self._stop_relay()
+        self.flow.reset()
         self.events.emit("state", self.get_state())
 
     async def connect_v4(self) -> None:
@@ -638,6 +643,7 @@ class Engine:
                     self._log(f"急停清零失败 {sid}/{ch}: {exc!r}")
         self._selected_wave["A"] = SILENT
         self._selected_wave["B"] = SILENT
+        self.flow.reset()
         self._log("急停完成：全部输出设备强度清零，波形已重置为静默")
 
     def _cancel_fire_holds(self) -> None:
@@ -917,10 +923,29 @@ class Engine:
         await self.modules.autostart()
         self._modules_ready = True
         self._check_missing_bindings()
+        try:
+            migrate_module_flows(self.flow)
+        except Exception:
+            self._log(f"事件流迁移失败:\n{traceback.format_exc()}")
 
     def _on_module_change(self, module_id: str) -> None:
+        self.refresh_flow_catalog()
         if self._modules_ready and self.modules.instance(module_id) is None:
             self._check_missing_bindings()
+
+    def refresh_flow_catalog(self) -> None:
+        """模块启用 / 卸载后立刻重建事件流目录：变量表与卡片列表不能留残项。"""
+        host = getattr(self, "flow", None)
+        if host is None:
+            return
+        loop = self.loop
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(host.modules_changed)
+                return
+            except RuntimeError:
+                pass
+        host.modules_changed()
 
     def _check_missing_bindings(self) -> None:
         missing = self.binding_missing_modules()

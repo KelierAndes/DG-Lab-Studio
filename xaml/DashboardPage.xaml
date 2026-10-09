@@ -27,22 +27,6 @@
             VerticalContentAlignment="Stretch" />
       </Grid>
 
-      <Grid ColumnSpacing="14">
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="1*" />
-          <ColumnDefinition Width="1*" />
-        </Grid.ColumnDefinitions>
-        <ContentControl
-            x:Name="InputValuesHost"
-            HorizontalContentAlignment="Stretch"
-            VerticalContentAlignment="Stretch" />
-        <ContentControl
-            x:Name="OutputValuesHost"
-            Grid.Column="1"
-            HorizontalContentAlignment="Stretch"
-            VerticalContentAlignment="Stretch" />
-      </Grid>
-
       <StackPanel x:Name="DevicesHost" Spacing="10" />
 
     </StackPanel>

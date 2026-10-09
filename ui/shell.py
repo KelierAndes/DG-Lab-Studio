@@ -17,7 +17,7 @@ from ui import nav, theme, widgets as W
 from ui.connect_page import ConnectPage
 from ui.control_page import ControlPage
 from ui.dashboard_page import DashboardPage
-from ui.link_page import LinkPage
+from ui.flow_page import FlowPage
 from ui.live import LogBuffer
 from ui.log_page import LogPage
 from ui.modules_page import ModulesPage
@@ -30,7 +30,7 @@ PAGE_CLASSES = {
     "dashboard": DashboardPage,
     "connect": ConnectPage,
     "control": ControlPage,
-    "link": LinkPage,
+    "flow": FlowPage,
     "modules": ModulesPage,
     "log": LogPage,
     "settings": SettingsPage,
@@ -40,7 +40,7 @@ NAV_LABELS = {
     "dashboard": ("概览", "Home"),
     "connect": ("连接", "Link"),
     "control": ("控制", "Play"),
-    "link": ("联动", "Switch"),
+    "flow": ("事件流", "Share"),
     "modules": ("模块", "Download"),
     "log": ("日志", "List"),
 }
@@ -72,6 +72,10 @@ class MainWindow(XamlClass, Window):
         nav.bind(self)
         self._build_nav()
         self.NavView.SelectedItem = self._items["dashboard"]
+        try:
+            self.RootGrid.PreviewKeyDown += self._on_root_key
+        except Exception:
+            pass
 
         engine.events.on("state", self._on_engine_state)
         engine.events.on("log", self._on_engine_log)
@@ -163,6 +167,20 @@ class MainWindow(XamlClass, Window):
                     method()
                 except Exception as exc:
                     self.logs.append(f"页面刷新失败: {exc!r}")
+
+    def _on_root_key(self, sender, args) -> None:
+        """按键转给当前页：Win2D 画布拿不到键盘焦点，KeyDown 不会冒泡到页面。"""
+        page = self._pages.get(self._tag)
+        forward = getattr(page, "root_key_down", None)
+        if forward is None or getattr(args, "Handled", False):
+            return
+        source = getattr(args, "OriginalSource", None)
+        if source is not None and hasattr(source, "SelectionStart"):
+            return        # 焦点在输入框里：按键属于打字，不是画布指令
+        try:
+            forward(args)
+        except Exception as exc:
+            self.logs.append(f"页面按键处理失败: {exc!r}")
 
     def _on_modules_changed(self, module_id: str) -> None:
         def _run():

@@ -113,7 +113,7 @@ def main():
 
     def spy(*a, **k):
         el = _orig(*a, **k)
-        made.append(el)
+        made.append(str((a[0] if a else k.get("title")) or ""))
         return el
 
     W.collapsible = spy
@@ -124,6 +124,8 @@ def main():
         fake.running = True
         win.engine.modules = fake
         win.goto("link")
+        made.clear()
+        win._page("link").rebuild()
         win._page("link").tick()
         fake._engine.signal("loud", 55)
         fake._engine.signal("beat", 3)
@@ -133,7 +135,7 @@ def main():
         time.sleep(1.4)
         hwnd = ctypes.windll.user32.FindWindowW(None, "DGStudio")
         grab(hwnd, os.path.join(OUT, "link_running.png"))
-        print("event stream captured, collapsibles:", len(made))
+        print("link sections:", made)
         App.window.ui_queue.put(close)
 
     def close():

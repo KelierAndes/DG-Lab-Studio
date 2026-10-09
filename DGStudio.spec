@@ -29,6 +29,10 @@ _STDLIB_SKIP = {"tkinter", "turtle", "turtledemo", "idlelib", "antigravity",
 
 hiddenimports = (
     collect_submodules("win32more.Microsoft")
+    + collect_submodules("win32more.Microsoft.Graphics.Canvas")
+    + collect_submodules("win32more.Microsoft.Graphics.DirectX")
+    + collect_submodules("win32more.Microsoft.Graphics.Imaging")
+    + collect_submodules("win32more.Microsoft.Web.WebView2")
     + collect_submodules("win32more.Windows.Foundation")
     + collect_submodules("win32more.Windows.Graphics")
     + collect_submodules("win32more.Windows.UI")

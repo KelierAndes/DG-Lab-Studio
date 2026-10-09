@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 import unittest
 import unittest.mock
 
@@ -939,7 +941,11 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
     async def test_binding_strength_single_channel(self):
         import app as app_module
 
-        engine = app_module.Engine()
+        # 用独立配置文件：这个用例要改 ble.ovc_profiles，共用仓库配置会被
+        # 同批别的用例改写，绑定就被别人的顺序盖掉了。
+        engine = app_module.Engine(
+            config_path=os.path.join(tempfile.gettempdir(),
+                                     "dgstudio_test_ovc_bind.json"))
         engine.start()
         try:
             calls: list[tuple] = []
@@ -964,7 +970,9 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
         import app as app_module
         from plugins import ButtonAction
 
-        engine = app_module.Engine()
+        engine = app_module.Engine(
+            config_path=os.path.join(tempfile.gettempdir(),
+                                     "dgstudio_test_ovc_osc.json"))
         engine.start()
         try:
             sent: list[tuple[str, int]] = []
@@ -1008,7 +1016,9 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
     async def test_binding_wave_single_channel(self):
         import app as app_module
 
-        engine = app_module.Engine()
+        engine = app_module.Engine(
+            config_path=os.path.join(tempfile.gettempdir(),
+                                     "dgstudio_test_ovc_wave.json"))
         engine.start()
         try:
             waves: list[tuple] = []
