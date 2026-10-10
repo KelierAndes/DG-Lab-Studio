@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import time
 from typing import Any, Callable
 
@@ -889,14 +890,62 @@ class FlowGraph:
 
 
 def graph_path(base_dir: str | None = None) -> str:
+    """旧版单文件事件流配置（v3 及更早）的路径，只用于迁移检测。"""
     root = base_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, "config", "event_flow.json")
+
+
+def profiles_dir(base_dir: str | None = None) -> str:
+    """事件流配置文件夹：每份配置一个 JSON，active 记在 index.json 里。"""
+    root = base_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "config", "event_flow")
 
 
 def vars_path(base_dir: str | None = None) -> str:
     """用户自建临时变量的全局清单（跨配置共用，与临时变量命名空间一致）。"""
     root = base_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, "config", "flow_vars.json")
+
+
+_PROFILE_INDEX = "index.json"
+_FILENAME_BAD = re.compile(r'[\\/:*?"<>|\r\n\t]+')
+
+
+def _profile_filename(name: str) -> str:
+    """配置名 → 文件名：非法字符换成下划线；两个名字撞文件名时后者覆盖前者。"""
+    stem = _FILENAME_BAD.sub("_", str(name or "").strip()).strip(" .")
+    return (stem or "profile") + ".json"
+
+
+def _read_json(target: str) -> Any:
+    try:
+        with open(target, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return None
+
+
+def _write_json(target: str, payload: Any) -> bool:
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = target + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp, target)
+        return True
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _profile_payload(name: str, graphs: dict[str, FlowGraph]) -> dict[str, Any]:
+    return {"version": 3, "name": str(name),
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "graphs": {page: graphs.get(page, FlowGraph(page)).to_dict()
+                       for page in PAGES}}
 
 
 def valid_var_name(name) -> str:
@@ -1024,18 +1073,61 @@ def clone_graphs(graphs: dict[str, FlowGraph]) -> dict[str, FlowGraph]:
     return out
 
 
-def load_profiles(path: str | None = None) -> tuple[str, dict[str, dict[str, FlowGraph]]]:
-    """读取多配置存档，返回 (当前配置名, {配置名: 两张画布})；旧单配置并入「默认」。"""
-    target = path or graph_path()
-    data: Any = {}
-    if os.path.isfile(target):
-        try:
-            with open(target, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except Exception:
-            data = {}
+def load_profiles(directory: str | None = None
+                  ) -> tuple[str, dict[str, dict[str, FlowGraph]]]:
+    """读取配置文件夹，返回 (当前配置名, {配置名: 两张画布})。
+
+    每份配置一个 JSON（文件内记显示名，改名即换文件），当前配置记在
+    index.json。旧版单文件 event_flow.json（v3 及更早）首次读到时拆分成
+    独立文件并改名为 .migrated，之后只读文件夹。
+    """
+    directory = directory or profiles_dir()
+    profiles: dict[str, dict[str, FlowGraph]] = {}
+    if os.path.isdir(directory):
+        for entry in sorted(os.listdir(directory)):
+            if not entry.endswith(".json") or entry == _PROFILE_INDEX:
+                continue
+            data = _read_json(os.path.join(directory, entry))
+            if not isinstance(data, dict):
+                continue
+            name = str(data.get("name") or entry[:-len(".json")]).strip()
+            if name:
+                profiles[name] = _graphs_of(data.get("graphs"))
+    if not profiles:
+        # 文件夹还没有任何配置：看一眼旁边的旧版单文件（config/event_flow.json），
+        # 有就拆成独立文件并改名为 .migrated，之后只读文件夹
+        legacy = directory + ".json"
+        if os.path.isfile(legacy):
+            profiles = _legacy_profiles(legacy)
+            if profiles:
+                for name, graphs in profiles.items():
+                    _write_json(os.path.join(directory, _profile_filename(name)),
+                                _profile_payload(name, graphs))
+                _write_json(os.path.join(directory, _PROFILE_INDEX),
+                            {"version": 1, "active": next(iter(profiles))})
+                try:
+                    os.replace(legacy, legacy + ".migrated")
+                except OSError:
+                    pass
+    if not profiles:
+        profiles[DEFAULT_PROFILE] = _empty_graphs()
+    index = _read_json(os.path.join(directory, _PROFILE_INDEX))
+    if isinstance(index, dict):
+        # index 里记着上次保存的配置顺序：下拉列表不因文件名排序而跳动
+        order = [str(n) for n in index.get("order") or []]
+        ordered = {name: profiles.pop(name) for name in order if name in profiles}
+        profiles = {**ordered, **profiles}
+    active = str(index.get("active") or "") if isinstance(index, dict) else ""
+    if active not in profiles:
+        active = next(iter(profiles))
+    return active, profiles
+
+
+def _legacy_profiles(legacy: str) -> dict[str, dict[str, FlowGraph]]:
+    """旧版单文件的解析：v3 的 profiles 大包、v2 及更早的单配置并入「默认」。"""
+    data = _read_json(legacy)
     if not isinstance(data, dict):
-        data = {}
+        return {}
     profiles: dict[str, dict[str, FlowGraph]] = {}
     raw = data.get("profiles")
     if isinstance(raw, dict):
@@ -1045,44 +1137,52 @@ def load_profiles(path: str | None = None) -> tuple[str, dict[str, dict[str, Flo
                 profiles[str(name)] = _graphs_of(graphs)
     elif data.get("graphs"):
         profiles[DEFAULT_PROFILE] = _graphs_of(data.get("graphs"))
-    if not profiles:
-        profiles[DEFAULT_PROFILE] = _empty_graphs()
-    active = str(data.get("active") or DEFAULT_PROFILE)
-    if active not in profiles:
-        active = next(iter(profiles))
-    return active, profiles
+    return profiles
 
 
 def save_profiles(active: str, profiles: dict[str, dict[str, FlowGraph]],
-                  path: str | None = None) -> bool:
-    target = path or graph_path()
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    payload = {"version": 3, "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-               "active": active,
-               "profiles": {name: {"graphs": {page: graphs.get(page, FlowGraph(page)).to_dict()
-                                              for page in PAGES}}
-                            for name, graphs in profiles.items()}}
-    tmp = target + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-        os.replace(tmp, target)
-        return True
-    except OSError:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return False
+                  directory: str | None = None) -> bool:
+    """整包落盘：每份配置一个文件，删掉已不存在的配置文件（改名 / 删除配置）。"""
+    directory = directory or profiles_dir()
+    os.makedirs(directory, exist_ok=True)
+    ok = True
+    kept: set[str] = set()
+    for name, graphs in profiles.items():
+        target = os.path.join(directory, _profile_filename(name))
+        kept.add(os.path.normcase(os.path.basename(target)))
+        ok = _write_json(target, _profile_payload(name, graphs)) and ok
+    for entry in os.listdir(directory):
+        if (entry.endswith(".json") and entry != _PROFILE_INDEX
+                and os.path.normcase(entry) not in kept):
+            try:
+                os.remove(os.path.join(directory, entry))
+            except OSError:
+                ok = False
+    if active not in profiles:
+        active = next(iter(profiles), DEFAULT_PROFILE)
+    ok = _write_json(os.path.join(directory, _PROFILE_INDEX),
+                     {"version": 1, "active": active,
+                      "order": list(profiles)}) and ok
+    return ok
 
 
 def load_graphs(path: str | None = None) -> dict[str, FlowGraph]:
-    active, profiles = load_profiles(path)
-    return profiles[active]
+    """读一份单配置文件（模块自带的默认事件流就是这种格式）。"""
+    data = _read_json(path or graph_path())
+    if isinstance(data, dict) and isinstance(data.get("profiles"), dict):
+        raw = data.get("profiles")
+        entry = raw.get(str(data.get("active") or "")) or next(iter(raw.values()), None)
+        graphs = entry.get("graphs") if isinstance(entry, dict) else entry
+        return _graphs_of(graphs)
+    return _graphs_of(data.get("graphs") if isinstance(data, dict) else None)
 
 
 def save_graphs(graphs: dict[str, FlowGraph], path: str | None = None) -> bool:
-    return save_profiles(DEFAULT_PROFILE, {DEFAULT_PROFILE: graphs}, path)
+    return _write_json(path or graph_path(),
+                       {"version": 3,
+                        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "graphs": {page: graphs.get(page, FlowGraph(page)).to_dict()
+                                   for page in PAGES}})
 
 
 def profile_modules(graphs: dict[str, FlowGraph]) -> list[str]:
@@ -1141,7 +1241,7 @@ class FlowRuntime:
         self.temps = temps if temps is not None else {}
         self.base_dir = base_dir
         self._log = log
-        self.path = graph_path(base_dir)
+        self.flow_dir = profiles_dir(base_dir)
         self.vars_file = vars_path(base_dir)
         self.user_vars: list[dict[str, str]] = []
         self.declared_vars: list[dict[str, str]] = []
@@ -1158,13 +1258,13 @@ class FlowRuntime:
 
     # ------------------------------------------------------------------ 配置
     def load(self) -> None:
-        self.active, self.profiles = load_profiles(self.path)
+        self.active, self.profiles = load_profiles(self.flow_dir)
         self.graphs = self.profiles[self.active]
         self.user_vars = load_vars(self.vars_file)
         self._declare_user_vars()
 
     def save(self) -> bool:
-        return save_profiles(self.active, self.profiles, self.path)
+        return save_profiles(self.active, self.profiles, self.flow_dir)
 
     # -------------------------------------------------------------- 临时变量表
     def _declare_user_vars(self) -> None:

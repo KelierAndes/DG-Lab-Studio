@@ -753,9 +753,10 @@ def _run_selftest() -> None:
                 REPORT["builtin_binding_ok"] = (win.engine.binding_missing_modules(
                     {"13": "fire", "12": "key:F1"}) == {})
                 err = win.engine.rename_ovc_profile("默认", "自检配置")
+                renamed_active, renamed_profiles = win.engine.binding_profiles()
                 REPORT["rename_ok"] = (err is None
-                                       and "自检配置" in win.engine.config["ble"]["ovc_profiles"]
-                                       and win.engine.config["ble"]["ovc_profile"] == "自检配置")
+                                       and "自检配置" in renamed_profiles
+                                       and renamed_active == "自检配置")
 
                 from win32more.Microsoft.UI.Xaml import Visibility
                 glow = ovc.button_glows.get(13)

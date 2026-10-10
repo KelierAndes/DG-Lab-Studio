@@ -16,6 +16,8 @@ from typing import Any, Callable
 from concurrent.futures import Future
 
 from module_store import ModuleStore
+from dglab import bindings as binding_store
+from dglab import event_flow
 from dglab.expr import variables as expr_variables
 from dglab.mapping import as_number
 from dglab.params import input_specs
@@ -793,8 +795,111 @@ class PluginManager:
             self._meta[module_id]["loaded"] = True
         self._register_actions(module_id, inst)
         self.engine._log(f"模块已加载: {inst.name or module_id} v{inst.version}")
+        try:
+            self.inject_module_profiles(module_id)
+        except Exception:
+            self.engine._log(f"模块 {module_id} 默认配置注入失败:\n"
+                             f"{traceback.format_exc()}")
         self.engine.events.emit("modules_changed", module_id)
         return inst
+
+    def _config_dir(self) -> str:
+        return os.path.dirname(getattr(self.engine.config, "path", "")) or ""
+
+    def _module_profile_files(self, module_id: str
+                              ) -> tuple[list[tuple[str, Any]],
+                                         list[tuple[str, dict[str, str]]]]:
+        """模块自带的默认配置：(flow 文件, bindings 文件)。
+
+        flow/<名>.json 是单配置事件流（load_graphs 格式），bindings/<名>.json 是
+        {"bindings": {按键位: 动作}} 或直接的映射表。空的 / 解析不了的跳过。
+        """
+        folder = self.module_dir(module_id) or ""
+        flows: list[tuple[str, Any]] = []
+        binds: list[tuple[str, dict[str, str]]] = []
+        flow_dir = os.path.join(folder, "flow")
+        if os.path.isdir(flow_dir):
+            for entry in sorted(os.listdir(flow_dir)):
+                if not entry.endswith(".json"):
+                    continue
+                graphs = event_flow.load_graphs(os.path.join(flow_dir, entry))
+                if any(getattr(g, "nodes", None) for g in graphs.values()):
+                    flows.append((entry[:-len(".json")], graphs))
+        bind_dir = os.path.join(folder, "bindings")
+        if os.path.isdir(bind_dir):
+            for entry in sorted(os.listdir(bind_dir)):
+                if not entry.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(bind_dir, entry), "r",
+                              encoding="utf-8") as handle:
+                        data = json.load(handle)
+                except Exception:
+                    continue
+                rows = (data.get("bindings")
+                        if isinstance(data, dict) and isinstance(data.get("bindings"), dict)
+                        else data if isinstance(data, dict) else {})
+                rows = {str(bit): str(action) for bit, action in rows.items()
+                        if str(bit) and str(action)}
+                if rows:
+                    binds.append((entry[:-len(".json")], rows))
+        return flows, binds
+
+    def inject_module_profiles(self, module_id: str) -> None:
+        """把模块自带的默认事件流 / 按键映射登记为**可选**配置文件。
+
+        每个模块版本只注入一次（版本号记在模块设置里）；同名配置已存在且不是
+        本模块上次注入的就不碰——用户自建的同名配置永不被覆盖，升级模块时
+        自己注入过的那份会被新版本覆盖。
+        """
+        version = str((self._meta.get(module_id) or {}).get("version")
+                      or getattr(self._instances.get(module_id), "version", "") or "")
+        settings = self.settings_for(module_id)
+        marker = settings.get("_injected_profiles")
+        if isinstance(marker, dict) and str(marker.get("version") or "") == version:
+            return
+        done = marker if isinstance(marker, dict) else {}
+        flow_done = [str(n) for n in done.get("flow") or []]
+        bind_done = [str(n) for n in done.get("bindings") or []]
+        flows, binds = self._module_profile_files(module_id)
+        if not flows and not binds:
+            return
+        flow_dir = event_flow.profiles_dir(self._config_dir())
+        active, known = event_flow.load_profiles(flow_dir)
+        for name, graphs in flows:
+            if name in known and name not in flow_done:
+                self.engine._log(
+                    f"模块 {module_id} 的默认事件流「{name}」与已有配置同名，未注入")
+                continue
+            known[name] = graphs
+            flow_done.append(name)
+            self.engine._log(
+                f"模块 {module_id} 的默认事件流已登记为可选配置：「{name}」")
+        if flows:
+            event_flow.save_profiles(active, known, flow_dir)
+            runtime = getattr(getattr(self.engine, "flow", None), "runtime", None)
+            if runtime is not None and getattr(runtime, "flow_dir", "") == flow_dir:
+                # 已在跑的运行时同步补上这几份配置，下拉框下次重建就能看到
+                for name, graphs in flows:
+                    runtime.profiles[name] = graphs
+        bind_dir = binding_store.bindings_dir(self._config_dir())
+        bind_active, bind_known = binding_store.load_binding_profiles(bind_dir)
+        for name, rows in binds:
+            if name in bind_known and name not in bind_done:
+                self.engine._log(
+                    f"模块 {module_id} 的默认按键映射「{name}」与已有配置同名，未注入")
+                continue
+            bind_known[name] = rows
+            bind_done.append(name)
+            self.engine._log(
+                f"模块 {module_id} 的默认按键映射已登记为可选配置：「{name}」")
+        if binds:
+            binding_store.save_binding_profiles(bind_active, bind_known, bind_dir)
+        settings["_injected_profiles"] = {"version": version,
+                                          "flow": flow_done,
+                                          "bindings": bind_done}
+        if hasattr(settings, "save"):
+            settings.save()
 
     def _unregister_actions(self, module_id: str) -> None:
         self._button_actions = {key: action for key, action

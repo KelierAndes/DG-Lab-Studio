@@ -397,10 +397,14 @@ class ModuleButtonActionTests(unittest.TestCase):
 class BindingProfileCheckTests(unittest.TestCase):
     def setUp(self):
         import app as app_module
+        import shutil
 
         self._roots = _FixtureRoots()
         self._roots.__enter__()
         self.addCleanup(self._roots.__exit__, None, None, None)
+        # 按键映射 / 事件流配置都落 tempdir/config/ 下的文件夹，先清干净防串场
+        shutil.rmtree(os.path.join(tempfile.gettempdir(), "config"),
+                      ignore_errors=True)
         path = os.path.join(tempfile.gettempdir(), "dgstudio_test_bindings.json")
         if os.path.exists(path):
             os.remove(path)
@@ -408,6 +412,36 @@ class BindingProfileCheckTests(unittest.TestCase):
 
     def tearDown(self):
         self.engine.stop()
+
+    def test_legacy_config_profiles_migrate_to_folder(self):
+        """主配置文件里的 ble.ovc_profiles 首次启动搬进 config/bindings/。"""
+        import app as app_module
+        import json as _json
+
+        shutil.rmtree(os.path.join(tempfile.gettempdir(), "config", "bindings"),
+                      ignore_errors=True)
+        path = os.path.join(tempfile.gettempdir(),
+                            "dgstudio_test_bindings_mig.json")
+        if os.path.exists(path):
+            os.remove(path)
+        with open(path, "w", encoding="utf-8") as handle:
+            _json.dump({"ble": {"ovc_profiles": {"默认": {"13": "fire"},
+                                                 "备用": {"15": "estop"}},
+                                "ovc_profile": "备用"}}, handle)
+        engine = app_module.Engine(config_path=path)
+        try:
+            active, profiles = engine.binding_profiles()
+            self.assertEqual(active, "备用")
+            self.assertEqual(profiles["默认"], {"13": "fire"})
+            self.assertEqual(profiles["备用"], {"15": "estop"})
+            self.assertEqual(engine.ovc_bindings(), {"15": "estop"})
+            # 主配置文件不再保存映射配置
+            self.assertNotIn("ovc_profiles", engine.config["ble"])
+            self.assertNotIn("ovc_profile", engine.config["ble"])
+        finally:
+            engine.stop()
+            if os.path.exists(path):
+                os.remove(path)
 
     def test_missing_detection_without_loaded_module(self):
         missing = self.engine.binding_missing_modules({
@@ -429,9 +463,8 @@ class BindingProfileCheckTests(unittest.TestCase):
 
         self.engine.start()
         try:
-            ble = self.engine.config["ble"]
-            ble["ovc_profiles"] = {"默认": {"13": "osc:/avatar/X"}}
-            ble["ovc_profile"] = "默认"
+            self.engine.save_binding_profiles("默认",
+                                              {"默认": {"13": "osc:/avatar/X"}})
             events = []
             self.engine.events.on("binding_modules_missing",
                                   lambda payload: events.append(payload))
@@ -447,28 +480,126 @@ class BindingProfileCheckTests(unittest.TestCase):
             self.engine.stop()
 
     def test_reset_bindings_clears_bits(self):
-        self.engine.config["ble"]["ovc_profiles"] = {"默认": {"13": "osc:/x",
-                                                             "15": "fire"}}
-        self.engine.config["ble"]["ovc_profile"] = "默认"
+        self.engine.save_binding_profiles(
+            "默认", {"默认": {"13": "osc:/x", "15": "fire"}})
         self.engine.reset_bindings(["13"])
-        self.assertEqual(self.engine.config["ble"]["ovc_profiles"]["默认"]["13"],
-                         "none")
-        self.assertEqual(self.engine.config["ble"]["ovc_profiles"]["默认"]["15"],
-                         "fire")
+        active, profiles = self.engine.binding_profiles()
+        self.assertEqual(profiles["默认"]["13"], "none")
+        self.assertEqual(profiles["默认"]["15"], "fire")
 
     def test_rename_profile(self):
-        ble = self.engine.config["ble"]
-        ble["ovc_profiles"] = {"默认": {"13": "fire"}, "配置1": {"15": "estop"}}
-        ble["ovc_profile"] = "配置1"
+        self.engine.save_binding_profiles(
+            "配置1", {"默认": {"13": "fire"}, "配置1": {"15": "estop"}})
         self.assertIsNone(self.engine.rename_ovc_profile("配置1", "急停方案"))
-        self.assertEqual(list(ble["ovc_profiles"]), ["默认", "急停方案"])
-        self.assertEqual(ble["ovc_profiles"]["急停方案"], {"15": "estop"})
-        self.assertEqual(ble["ovc_profile"], "急停方案")
+        active, profiles = self.engine.binding_profiles()
+        self.assertEqual(list(profiles), ["默认", "急停方案"])
+        self.assertEqual(profiles["急停方案"], {"15": "estop"})
+        self.assertEqual(active, "急停方案")
         self.assertIn("已存在", self.engine.rename_ovc_profile("急停方案", "默认"))
         self.assertIn("不存在", self.engine.rename_ovc_profile("缺失", "x"))
         self.assertIsNone(self.engine.rename_ovc_profile("急停方案", "急停方案"))
         self.assertEqual(self.engine.rename_ovc_profile("急停方案", "  "),
                          "名称不能为空")
+
+
+class ModuleProfileInjectionTests(unittest.TestCase):
+    """模块自带 flow/ bindings/ 默认配置：装载时登记为可选配置文件。"""
+
+    def setUp(self):
+        self._roots = _FixtureRoots()
+        self._roots.__enter__()
+        self.addCleanup(self._roots.__exit__, None, None, None)
+        base = tempfile.mkdtemp(prefix="dgstudio_inject_")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        self.engine = _FakeEngine()
+        self.engine.config.path = os.path.join(base, "config.json")
+        self.manager = PluginManager(self.engine)
+        self.engine.modules = self.manager
+        import dglab.event_flow as EF
+        import dglab.bindings as bs
+        self.EF = EF
+        self.bs = bs
+        self.flow_dir = EF.profiles_dir(os.path.dirname(self.engine.config.path))
+        self.bind_dir = bs.bindings_dir(os.path.dirname(self.engine.config.path))
+
+    def _flow_payload(self, value: float) -> bytes:
+        graphs = {"version": 3, "graphs": {
+            "input": {"nodes": [{"id": "i1", "def": "var.const_float",
+                                 "x": 0.0, "y": 0.0, "params": {"v": value},
+                                 "alias": "", "overrides": []}],
+                      "wires": []},
+            "output": {"nodes": [], "wires": []}}}
+        return json.dumps(graphs, ensure_ascii=False).encode("utf-8")
+
+    def _write_profile_module(self, version: str, flow_value: float,
+                              flow_name: str = "默认接线") -> None:
+        meta = {"id": "flowy", "name": "带默认配置的模块", "version": version,
+                "description": "测试注入。", "settings_key": "flowy"}
+        body = """
+
+class FlowyModule:
+    id = META["id"]
+    name = META["name"]
+    version = META["version"]
+    settings_key = META["settings_key"]
+
+    def on_load(self, ctx):
+        pass
+
+    def on_unload(self):
+        pass
+"""
+        _write_module(self._roots.root, "flowy", meta, body, files={
+            f"flow/{flow_name}.json": self._flow_payload(flow_value),
+            "bindings/默认按键.json": b'{"bindings": {"13": "fire"}}',
+        })
+
+    def test_load_injects_module_profiles_as_selectable(self):
+        self._write_profile_module("0.1.0", 42.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        active, profiles = self.EF.load_profiles(self.flow_dir)
+        self.assertEqual(active, "默认")
+        self.assertIn("默认接线", profiles)
+        self.assertAlmostEqual(
+            profiles["默认接线"][self.EF.PAGE_INPUT].nodes[0].params["v"], 42.0)
+        bind_active, binds = self.bs.load_binding_profiles(self.bind_dir)
+        self.assertEqual(binds["默认按键"], {"13": "fire"})
+        settings = self.manager.settings_for("flowy")
+        self.assertEqual(settings["_injected_profiles"]["version"], "0.1.0")
+        # 再装载（重启场景）不重复注入也不改当前配置
+        import asyncio
+        asyncio.run(self.manager.unload("flowy"))
+        self.manager.load("flowy")
+        active2, profiles2 = self.EF.load_profiles(self.flow_dir)
+        self.assertEqual(active2, "默认")
+        self.assertEqual(sorted(profiles2), ["默认", "默认接线"])
+
+    def test_same_name_user_profile_is_never_clobbered(self):
+        graphs = {page: self.EF.FlowGraph(page) for page in self.EF.PAGES}
+        self.EF.save_profiles("默认", {"默认": graphs, "默认接线": graphs},
+                              self.flow_dir)
+        self._write_profile_module("0.1.0", 42.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        _active, profiles = self.EF.load_profiles(self.flow_dir)
+        # 用户自建的同名配置原样保留：还是空画布，没有模块那颗 v=42 的卡
+        row = profiles["默认接线"][self.EF.PAGE_INPUT]
+        self.assertEqual(row.nodes, [])
+        self.assertTrue(any("同名" in line for line in self.engine._logs))
+
+    def test_version_bump_overwrites_own_injection(self):
+        self._write_profile_module("0.1.0", 42.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        import asyncio
+        asyncio.run(self.manager.unload("flowy"))
+        self._write_profile_module("0.2.0", 99.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        _active, profiles = self.EF.load_profiles(self.flow_dir)
+        self.assertAlmostEqual(
+            profiles["默认接线"][self.EF.PAGE_INPUT].nodes[0].params["v"], 99.0)
 
 
 class ConfigDrivenTests(unittest.TestCase):

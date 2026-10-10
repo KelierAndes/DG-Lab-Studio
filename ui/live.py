@@ -240,7 +240,7 @@ def link_counts(engine, state: EngineState) -> dict:
     outputs: list[tuple[str, str]] = []
     try:
         bindings = engine.ovc_bindings()
-        profile = engine.config.get("ble", {}).get("ovc_profile", "")
+        profile = engine.binding_profiles()[0]
     except Exception:
         bindings, profile = {}, ""
     bound = sum(1 for v in bindings.values() if v and v != "none")
@@ -396,7 +396,7 @@ def input_channel_rows(engine, state: EngineState) -> list[dict]:
     rows = []
     try:
         bindings = engine.ovc_bindings()
-        profile = engine.config.get("ble", {}).get("ovc_profile", "")
+        profile = engine.binding_profiles()[0]
     except Exception:
         bindings, profile = {}, ""
     bound = sum(1 for v in bindings.values() if v and v != "none")

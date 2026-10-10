@@ -13,6 +13,7 @@ from typing import Any
 
 import socket as _socket
 
+from dglab import bindings as binding_store
 from dglab.ble import BleClient
 from dglab import keys as keyboard_keys
 from dglab.official_waveforms import CoyoteWaveform
@@ -852,20 +853,61 @@ class Engine:
             return backend.monitors.get(sid) if sid else None
         return None
 
+    def _config_dir(self) -> str:
+        return os.path.dirname(getattr(self.config, "path", "")) or ""
+
     def _migrate_ovc_profiles(self) -> None:
+        """按键映射配置落进 config/bindings/ 文件夹（每份配置一个 JSON）。
+
+        旧版整套塞在主配置文件的 ble.ovc_profiles 里；首次启动时搬出去，
+        之后主配置文件不再保存任何映射配置。
+        """
         ble = self.config.setdefault("ble", {})
-        profiles = ble.get("ovc_profiles")
-        if not isinstance(profiles, dict) or not profiles:
-            ble["ovc_profiles"] = {"默认": dict(ble.get("ovc_buttons") or {})}
-        if not ble.get("ovc_profile"):
-            ble["ovc_profile"] = next(iter(ble["ovc_profiles"]), "默认")
+        active, folder = binding_store.load_binding_profiles(
+            binding_store.bindings_dir(self._config_dir()))
+        legacy = ble.get("ovc_profiles")
+        if folder:
+            if isinstance(legacy, dict):
+                ble.pop("ovc_profiles", None)
+                self.config.save()
+            return
+        if not isinstance(legacy, dict) or not legacy:
+            profiles = {"默认": dict(ble.get("ovc_buttons") or {})}
+            active = "默认"
+        else:
+            profiles = {str(name): {str(bit): str(binding)
+                                    for bit, binding in (rows or {}).items()}
+                        for name, rows in legacy.items()}
+            active = str(ble.get("ovc_profile") or next(iter(profiles), "默认"))
+            if active not in profiles:
+                active = next(iter(profiles))
+        binding_store.save_binding_profiles(
+            active, profiles, binding_store.bindings_dir(self._config_dir()))
+        ble.pop("ovc_profiles", None)
+        ble.pop("ovc_profile", None)
+        self.config.save()
+        self._log(f"按键映射配置已迁到 config/bindings/（{len(profiles)} 份）")
+
+    def binding_profiles(self) -> tuple[str, dict[str, dict[str, str]]]:
+        """(当前配置名, {配置名: 按键绑定})，读 config/bindings/ 文件夹。"""
+        return binding_store.load_binding_profiles(
+            binding_store.bindings_dir(self._config_dir()))
+
+    def save_binding_profiles(self, active: str,
+                              profiles: dict[str, dict[str, str]]) -> bool:
+        return binding_store.save_binding_profiles(
+            active, profiles, binding_store.bindings_dir(self._config_dir()))
+
+    def switch_binding_profile(self, name: str) -> bool:
+        active, profiles = self.binding_profiles()
+        if name not in profiles or name == active:
+            return False
+        self.save_binding_profiles(name, profiles)
+        return True
 
     def ovc_bindings(self) -> dict[str, str]:
-        ble = self.config.get("ble", {})
-        profiles = ble.get("ovc_profiles") or {}
-        active = ble.get("ovc_profile") or next(iter(profiles), "默认")
-        return profiles.get(active) or ble.get("ovc_buttons") or {}
-
+        active, profiles = self.binding_profiles()
+        return profiles.get(active) or {}
 
     def binding_missing_modules(self, bindings: dict | None = None) -> dict[str, str]:
         if bindings is None:
@@ -889,20 +931,19 @@ class Engine:
         return sorted(mid for mid in module_ids if mid)
 
     def reset_bindings(self, bits, profile: str | None = None) -> None:
-        ble = self.config.setdefault("ble", {})
-        profiles = ble.setdefault("ovc_profiles", {})
-        active = profile or ble.get("ovc_profile") or next(iter(profiles), "默认")
+        active, profiles = self.binding_profiles()
+        if profile and profile in profiles:
+            active = profile
         prof = profiles.setdefault(active, {})
         for bit in bits:
             prof[str(bit)] = "none"
-        self.config.save()
+        self.save_binding_profiles(active, profiles)
         self._log(f"配置「{active}」中 {len(list(bits))} 个按键绑定已重置为无动作 "
                   f"(引用未启用的模块)")
 
     def rename_ovc_profile(self, old: str, new: str) -> str | None:
         new = (new or "").strip()
-        ble = self.config.setdefault("ble", {})
-        profiles = ble.setdefault("ovc_profiles", {})
+        active, profiles = self.binding_profiles()
         if old not in profiles:
             return f"配置「{old}」不存在"
         if not new:
@@ -911,11 +952,8 @@ class Engine:
             return None
         if new in profiles:
             return f"配置「{new}」已存在"
-        ble["ovc_profiles"] = {(new if k == old else k): v
-                               for k, v in profiles.items()}
-        if ble.get("ovc_profile") == old:
-            ble["ovc_profile"] = new
-        self.config.save()
+        renamed = {(new if k == old else k): v for k, v in profiles.items()}
+        self.save_binding_profiles(new if active == old else active, renamed)
         self._log(f"按键映射配置文件已重命名: {old} → {new}")
         return None
 

@@ -454,17 +454,16 @@ class ControlPage(XamlClass, Page):
 
 
     def _active_bindings(self) -> dict:
-        ble = self.shell.engine.config.setdefault("ble", {})
-        profiles = ble.setdefault("ovc_profiles", {})
-        active = ble.setdefault("ovc_profile", "默认")
+        engine = self.shell.engine
+        active, profiles = engine.binding_profiles()
         return profiles.setdefault(active, {})
 
     def _profile_selector(self, view: CardView) -> object:
         engine = self.shell.engine
-        ble = engine.config.setdefault("ble", {})
-        profiles = ble.setdefault("ovc_profiles", {})
+        active, profiles = engine.binding_profiles()
         names = list(profiles) or ["默认"]
-        active = ble.get("ovc_profile") if ble.get("ovc_profile") in names else names[0]
+        if active not in names:
+            active = names[0]
         combo = W.combo(names, selected=names.index(active), width=140)
         view.profile_combo = combo
 
@@ -475,12 +474,11 @@ class ControlPage(XamlClass, Page):
             if not (0 <= index < len(names)):
                 return
             target = names[index]
-            if ble.get("ovc_profile") == target:
+            if active == target:
                 return
             missing = engine.binding_missing_modules(profiles.get(target) or {})
             if not missing:
-                ble["ovc_profile"] = target
-                engine.save_config()
+                engine.switch_binding_profile(target)
                 self.rebuild()
                 return
             module_ids = engine.modules_for_bindings(missing)
@@ -495,14 +493,14 @@ class ControlPage(XamlClass, Page):
         combo.SelectionChanged += _switch
 
         def _new(sender, args):
-            template = dict(self._active_bindings())
+            active, profiles = engine.binding_profiles()
+            template = dict(profiles.get(active) or {})
             index = 1
             while f"配置{index}" in profiles:
                 index += 1
             name = f"配置{index}"
             profiles[name] = template
-            ble["ovc_profile"] = name
-            engine.save_config()
+            engine.save_binding_profiles(name, profiles)
             self.rebuild()
 
         new_btn = W.button("＋新建", width=64, height=32, v="center", on_click=_new)
@@ -549,16 +547,13 @@ class ControlPage(XamlClass, Page):
                 "可切换到该配置后将相关绑定改回其他动作。",
                 close="知道了")
             return
-        ble = engine.config.setdefault("ble", {})
-        ble["ovc_profile"] = target
-        engine.save_config()
+        engine.switch_binding_profile(target)
         self.rebuild()
 
     async def _rename_profile_flow(self) -> None:
         engine = self.shell.engine
-        ble = engine.config.setdefault("ble", {})
-        profiles = ble.setdefault("ovc_profiles", {})
-        old = ble.get("ovc_profile") or next(iter(profiles), "默认")
+        active, profiles = engine.binding_profiles()
+        old = active or next(iter(profiles), "默认")
         new = await prompt_text(self.shell, "重命名配置文件",
                                 f"将按键映射配置「{old}」重命名为：",
                                 initial=old, primary="重命名")

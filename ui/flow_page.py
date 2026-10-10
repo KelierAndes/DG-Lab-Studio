@@ -1548,6 +1548,9 @@ class FlowPage(XamlClass, Page):
         if not system:
             d.text("（模块未启动 / 设备未连接）", left + 2, y + 6, 11.5,
                    self._bc("text_faint"))
+            # 空态提示占整行高度：总数按空段预留了一行，绘制侧不占位
+            # 就会和下一段标题叠在一起
+            y += VAR_ROW_H
         for row in system:
             self._paint_var_row(left, y, width, row, drag=True)
             y += VAR_ROW_H
@@ -1571,6 +1574,7 @@ class FlowPage(XamlClass, Page):
         if not user:
             d.text("（点「＋ 新增」登记一个变量名）", left + 2, y + 6, 11.5,
                    self._bc("text_faint"))
+            y += VAR_ROW_H
         for row in user:
             self._paint_var_row(left, y, width, row, rename=True,
                                 boxed=top - 2.0 <= y <= bottom)

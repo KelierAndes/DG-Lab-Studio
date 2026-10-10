@@ -362,17 +362,28 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import shutil
+
+        # 按键映射配置现在落 tempdir/config/bindings 文件夹，先清干净防串场
+        shutil.rmtree(os.path.join(tempfile.gettempdir(), "config", "bindings"),
+                      ignore_errors=True)
+        path = os.path.join(tempfile.gettempdir(), "dgstudio_test_ovc_button.json")
+        if os.path.exists(path):
+            os.remove(path)
+
     def _engine(self):
         import app as app_module
 
-        engine = app_module.Engine()
+        # 用独立配置文件：这些用例要写按键映射配置，不能碰仓库里的真实配置
+        engine = app_module.Engine(
+            config_path=os.path.join(tempfile.gettempdir(),
+                                     "dgstudio_test_ovc_button.json"))
         engine.start()
         return engine
 
     def _set_profile(self, engine, mapping: dict) -> None:
-        ble = engine.config.setdefault("ble", {})
-        ble["ovc_profiles"] = {"默认": dict(mapping)}
-        ble["ovc_profile"] = "默认"
+        engine.save_binding_profiles("默认", {"默认": dict(mapping)})
 
     async def test_binding_dispatches_fire_hold(self):
         engine = self._engine()
@@ -432,17 +443,28 @@ class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
     async def test_profile_migration_and_switch(self):
         engine = self._engine()
         try:
-            ble = engine.config["ble"]
-            self.assertIn("默认", ble["ovc_profiles"])
-            self.assertEqual(ble["ovc_profile"], "默认")
-            legacy = ble["ovc_profiles"]["默认"]
+            active, profiles = engine.binding_profiles()
+            self.assertEqual(active, "默认")
+            self.assertIn("默认", profiles)
+            legacy = profiles["默认"]
             self.assertEqual(engine.ovc_bindings().get("13"), legacy.get("13"))
-            ble["ovc_profiles"]["配置2"] = {"13": "estop"}
-            ble["ovc_profile"] = "配置2"
+            profiles["配置2"] = {"13": "estop"}
+            engine.save_binding_profiles("配置2", profiles)
             self.assertEqual(engine.ovc_bindings()["13"], "estop")
-            ble["ovc_profile"] = "不存在的配置"
+            # index 指向不存在的配置时回落到第一份，绑定照常可用
+            import json as _json
+            from dglab import bindings as _binding_store
+            store_dir = _binding_store.bindings_dir(
+                os.path.dirname(engine.config.path))
+            os.makedirs(store_dir, exist_ok=True)
+            with open(os.path.join(store_dir, "index.json"), "w",
+                      encoding="utf-8") as handle:
+                _json.dump({"version": 1, "active": "不存在的配置"}, handle)
+            active, profiles = engine.binding_profiles()
+            # 回落到排序后的第一份配置，不固定是「默认」
+            self.assertEqual(active, next(iter(profiles)))
             self.assertEqual(engine.ovc_bindings().get("13"),
-                             ble["ovc_profiles"]["默认"].get("13"))
+                             profiles[active].get("13"))
         finally:
             engine.stop()
 
@@ -970,12 +992,11 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
                 calls.append((channel, delta, slot_id))
 
             engine.add_strength = fake_add
-            bindings = (engine.config.setdefault("ble", {})
-                        .setdefault("ovc_profiles", {}).setdefault("默认", {}))
-            engine.config["ble"]["ovc_profile"] = "默认"
-            bindings["13"] = "a_strength_up"
+            engine.save_binding_profiles(
+                "默认", {"默认": {"13": "a_strength_up"}})
             engine._on_ovc_button("addr-ovc", 13)
-            bindings["13"] = "b_strength_down"
+            engine.save_binding_profiles(
+                "默认", {"默认": {"13": "b_strength_down"}})
             engine._on_ovc_button("addr-ovc", 13)
             await _settled(lambda: len(calls) == 2)
             self.assertEqual(calls, [("A", 1, "addr-ovc"), ("B", -1, "addr-ovc")])
@@ -1018,10 +1039,8 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
                         on_release=lambda slot, arg: self.bridge.send_value(arg, 0))]
 
             engine.modules.register_instance("osc_bridge", FakeModule(sent))
-            bindings = (engine.config.setdefault("ble", {})
-                        .setdefault("ovc_profiles", {}).setdefault("默认", {}))
-            engine.config["ble"]["ovc_profile"] = "默认"
-            bindings["13"] = "osc:/avatar/parameters/Trigger"
+            engine.save_binding_profiles(
+                "默认", {"默认": {"13": "osc:/avatar/parameters/Trigger"}})
             engine._on_ovc_button("addr-ovc", 13)
             engine._on_ovc_button_up("addr-ovc", 13)
             self.assertEqual(sent, [("/avatar/parameters/Trigger", 1),
@@ -1049,12 +1068,11 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
             state.slots["addr-ovc"] = Slot(slot_id="addr-ovc", name="负鼠",
                                            type="OVC_1")
             engine._backend = types.SimpleNamespace(state=state)
-            bindings = (engine.config.setdefault("ble", {})
-                        .setdefault("ovc_profiles", {}).setdefault("默认", {}))
-            engine.config["ble"]["ovc_profile"] = "默认"
-            bindings["13"] = "a_wave_up"
+            engine.save_binding_profiles(
+                "默认", {"默认": {"13": "a_wave_up"}})
             engine._on_ovc_button("addr-ovc", 13)
-            bindings["13"] = "b_wave_down"
+            engine.save_binding_profiles(
+                "默认", {"默认": {"13": "b_wave_down"}})
             engine._on_ovc_button("addr-ovc", 13)
             await _settled(lambda: len(waves) == 2)
             from dglab.waves import wave_order

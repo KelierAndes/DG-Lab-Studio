@@ -27,10 +27,13 @@ def _catalog() -> EF.Catalog:
 
 
 def _remove(path: str) -> None:
-    try:
-        os.remove(path)
-    except OSError:
-        pass
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+    if os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 class CatalogTests(unittest.TestCase):
@@ -437,8 +440,8 @@ class RuntimeTests(unittest.TestCase):
             path = os.path.join(tmp, "event_flow.json")
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(raw, handle, ensure_ascii=False)
-            _active, profiles = EF.load_profiles(path)
-        graph = profiles[EF.DEFAULT_PROFILE][EF.PAGE_INPUT]
+            graphs = EF.load_graphs(path)
+        graph = graphs[EF.PAGE_INPUT]
         ops = [self.catalog.definition(n.def_key)["op"] for n in graph.nodes]
         self.assertEqual(ops, ["free_expr", "temp_write"])
         names = [n.params.get("name") for n in graph.nodes]
@@ -496,8 +499,7 @@ class ProfileTests(unittest.TestCase):
 
     def setUp(self):
         self.catalog = _catalog()
-        handle, self.path = tempfile.mkstemp(suffix=".json")
-        os.close(handle)
+        self.path = tempfile.mkdtemp(suffix="_flow")
         self.addCleanup(_remove, self.path)
 
     def _graphs(self, def_key: str, value: float):
@@ -519,27 +521,55 @@ class ProfileTests(unittest.TestCase):
         self.assertAlmostEqual(
             loaded["默认"][EF.PAGE_INPUT].nodes[0].params["v"], 11.0)
 
-    def test_legacy_single_profile_file_becomes_default(self):
+    def test_legacy_single_file_splits_into_folder(self):
+        """旧版单文件 event_flow.json 首次读到时拆成每配置一个文件。"""
+        base = tempfile.mkdtemp(suffix="_legacy")
+        self.addCleanup(_remove, base)
+        legacy = os.path.join(base, "event_flow.json")
+        directory = os.path.join(base, "event_flow")
         graphs = self._graphs("var.const_float", 33.0)
-        with open(self.path, "w", encoding="utf-8") as handle:
+        with open(legacy, "w", encoding="utf-8") as handle:
             json.dump({"version": 2,
                        "graphs": {page: g.to_dict() for page, g in graphs.items()}},
                       handle, ensure_ascii=False)
-        active, profiles = EF.load_profiles(self.path)
-        self.assertEqual(active, EF.DEFAULT_PROFILE)
-        self.assertEqual(list(profiles), [EF.DEFAULT_PROFILE])
+        active, profiles = EF.load_profiles(directory)
+        self.assertEqual((active, list(profiles)),
+                         (EF.DEFAULT_PROFILE, [EF.DEFAULT_PROFILE]))
         self.assertAlmostEqual(
-            EF.load_graphs(self.path)[EF.PAGE_INPUT].nodes[0].params["v"], 33.0)
-        self.assertTrue(EF.save_graphs(graphs, self.path))
-        with open(self.path, encoding="utf-8") as handle:
-            payload = json.load(handle)
-        self.assertEqual(payload["version"], 3)
-        self.assertEqual(list(payload["profiles"]), [EF.DEFAULT_PROFILE])
+            profiles[EF.DEFAULT_PROFILE][EF.PAGE_INPUT].nodes[0].params["v"], 33.0)
+        # 拆分落盘：配置独立成文件 + index 记当前配置，旧文件改名 .migrated
+        self.assertTrue(os.path.isfile(os.path.join(directory, "默认.json")))
+        self.assertTrue(os.path.isfile(os.path.join(directory, "index.json")))
+        self.assertTrue(os.path.isfile(legacy + ".migrated"))
+        again_active, again = EF.load_profiles(directory)
+        self.assertEqual((again_active, sorted(again)),
+                         (EF.DEFAULT_PROFILE, [EF.DEFAULT_PROFILE]))
+        self.assertAlmostEqual(
+            again[EF.DEFAULT_PROFILE][EF.PAGE_INPUT].nodes[0].params["v"], 33.0)
+        # 单配置文件读写（模块自带的默认事件流就是这种格式）
+        single = os.path.join(base, "single.json")
+        self.assertTrue(EF.save_graphs(graphs, single))
+        self.assertAlmostEqual(
+            EF.load_graphs(single)[EF.PAGE_INPUT].nodes[0].params["v"], 33.0)
 
     def test_missing_file_yields_one_empty_default(self):
-        active, profiles = EF.load_profiles(self.path + ".ghost")
+        active, profiles = EF.load_profiles(os.path.join(self.path, "ghost"))
         self.assertEqual((active, list(profiles)), (EF.DEFAULT_PROFILE, ["默认"]))
         self.assertEqual(profiles["默认"][EF.PAGE_INPUT].nodes, [])
+
+    def test_save_drops_renamed_profile_file(self):
+        """配置改名 = 换文件：旧文件在整包落盘时被清掉，不留幽灵配置。"""
+        graphs = self._graphs("var.const_float", 5.0)
+        self.assertTrue(EF.save_profiles(
+            "默认", {"默认": graphs, "旧名": graphs}, self.path))
+        self.assertIn("旧名.json", os.listdir(self.path))
+        self.assertTrue(EF.save_profiles(
+            "默认", {"默认": graphs, "新名": graphs}, self.path))
+        files = os.listdir(self.path)
+        self.assertIn("新名.json", files)
+        self.assertNotIn("旧名.json", files)
+        _active, profiles = EF.load_profiles(self.path)
+        self.assertEqual(set(profiles), {"默认", "新名"})
 
     def test_runtime_new_profile_clones_and_switches(self):
         runtime = EF.FlowRuntime(self.catalog, self._graphs("var.const_float", 5.0))
@@ -641,8 +671,8 @@ class MigrationTests(unittest.TestCase):
             path = os.path.join(tmp, "event_flow.json")
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(raw, handle, ensure_ascii=False)
-            _active, profiles = EF.load_profiles(path)
-        graph = profiles[EF.DEFAULT_PROFILE][EF.PAGE_INPUT]
+            graphs = EF.load_graphs(path)
+        graph = graphs[EF.PAGE_INPUT]
         keys = sorted(node.def_key for node in graph.nodes)
         self.assertEqual(keys, ["mod.change", "mod.period", "var.temp_read"])
         change = next(n for n in graph.nodes if n.def_key == "mod.change")
@@ -1049,7 +1079,7 @@ class FlowHostTests(unittest.TestCase):
         self.assertNotIn("events", cfg)
         self.assertNotIn("temps", cfg)
         self.assertGreaterEqual(cfg.saved, 1)
-        self.assertTrue(os.path.isfile(self.host.runtime.path))
+        self.assertTrue(os.path.isdir(self.host.runtime.flow_dir))
         ops = [self.host.catalog.definition(node.def_key)["op"]
                for node in self.host.runtime.graphs[EF.PAGE_INPUT].nodes]
         self.assertNotIn("temp_expr", ops)
@@ -1079,12 +1109,12 @@ class FlowHostTests(unittest.TestCase):
                        "mod.read.osc_bridge.osc_strength", 0.0, 0.0)
         self.host.runtime.new_profile("演出")
         self.host.runtime.save()
-        active, profiles = EF.load_profiles(self.host.runtime.path)
+        active, profiles = EF.load_profiles(self.host.runtime.flow_dir)
         self.assertEqual((active, sorted(profiles)), ("演出", ["演出", "默认"]))
         self.assertTrue(self.host.switch_profile(EF.DEFAULT_PROFILE))
         self.assertEqual(self.host.runtime.active, EF.DEFAULT_PROFILE)
         self.assertFalse(self.host.switch_profile("ghost"))
-        active, _profiles = EF.load_profiles(self.host.runtime.path)
+        active, _profiles = EF.load_profiles(self.host.runtime.flow_dir)
         self.assertEqual(active, EF.DEFAULT_PROFILE)
         self.engine.modules.enabled = set()
         self.host.refresh(force=True)
