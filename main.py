@@ -268,7 +268,7 @@ def _probe_var_box(flow, name: str):
 
 
 def _osc_row_probe(runtime, engine) -> tuple[bool, str]:
-    """自检：OSC 真机登记行全部落在可改名栏，方向一律按 OSC 路径判定。
+    """自检：OSC 真机登记行全部落在可改名栏，方向一律按数据流判定。
 
     走的是模块自己的 link_params / temp_specs + 核心的合并口径，不是手搓
     夹具——上一轮就是夹具绿、真机反。模块的第三方依赖装在它自己的 _deps 目录，
@@ -335,16 +335,17 @@ def _osc_row_probe(runtime, engine) -> tuple[bool, str]:
              and str(row.get("mid") or "") == "osc_bridge"]
     if len(paths) < 10:
         return False, f"paths={len(paths)}"
-    # 方向按参数语义：设备回传读数只能读，核心输入参数才允许写
+    # 方向按数据流：设备读数由核心读出后发回头像（可写），头像发入的
+    # 控制参数收包镜像给宿主读出（可读）
     readouts = ("Battery", "Connected", "ChannelOK", "Limit", "Pressure",
                 "EdgeState", "Action")
     controls = ("Wave", "Fire", "Pulse", "Emergency", "Zap")
     bad = [f"{row['name']}={row['dir']}" for row in paths
            if any(tail in row["name"] for tail in readouts)
-           and row["dir"] != "in"]
+           and row["dir"] != "out"]
     bad += [f"{row['name']}={row['dir']}" for row in paths
             if any(tail in row["name"] for tail in controls)
-            and row["dir"] == "in"]
+            and row["dir"] == "out"]
     seen_read = any(any(tail in row["name"] for tail in readouts)
                     for row in paths)
     seen_ctrl = any(any(tail in row["name"] for tail in controls)
