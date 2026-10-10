@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 import urllib.request
@@ -20,7 +21,11 @@ DEFAULT_REPO = {"owner": "KelierAndes", "name": "dgstudio-modules-market",
 _UA = "DGStudio-ModuleStore/1.0"
 _MARKET_NAME = "market.yaml"
 _HTTP_TIMEOUT = 10.0
-_ZIP_TIMEOUT = 120.0
+# 模块自带的 wheel 动辄几十 MB（opencv / onnxruntime），10 秒的清单级超时不够；
+# 这里的 timeout 是「单次 socket 读」的上限，不是整个传输的时限。
+_FILE_TIMEOUT = 120.0
+_ZIP_TIMEOUT = 60.0
+_ZIP_RETRIES = 3
 
 MIRROR_PRESETS = ("https://ghfast.top/", "https://gh-proxy.com/",
                   "https://ghproxy.net/")
@@ -28,10 +33,14 @@ PROXY_PRESETS = ("http://127.0.0.1:7890", "http://127.0.0.1:7897",
                  "http://127.0.0.1:10809")
 
 
-def _http_get(url: str, *, timeout: float = _HTTP_TIMEOUT, opener=None) -> bytes:
+def _open_url(url: str, *, timeout: float, opener=None):
     request = urllib.request.Request(url, headers={"User-Agent": _UA})
     open_url = opener.open if opener is not None else urllib.request.urlopen
-    with open_url(request, timeout=timeout) as resp:
+    return open_url(request, timeout=timeout)
+
+
+def _http_get(url: str, *, timeout: float = _HTTP_TIMEOUT, opener=None) -> bytes:
+    with _open_url(url, timeout=timeout, opener=opener) as resp:
         return resp.read()
 
 
@@ -469,10 +478,35 @@ class ModuleStore:
     def _repo_coords(entry: dict) -> dict:
         return {"repo": entry["repo"], "branch": entry.get("branch") or "main"}
 
+    def _fetch_zip(self, entry: dict, opener=None) -> bytes:
+        """整仓快照落到临时文件再读：几十 MB 的 wheel 仓库直接 read() 成常见断流。
+
+        codeload 在大仓库上会 IncompleteRead，所以按次重试；每次都是新连接，
+        比把半截数据留在内存里更可能读完。全部失败交给上层回退逐文件取。
+        """
+        url = self._zip_url(entry)
+        errors: list[str] = []
+        for _attempt in range(_ZIP_RETRIES):
+            handle, path = tempfile.mkstemp(suffix=".zip", prefix="dgstudio_")
+            os.close(handle)
+            try:
+                with _open_url(url, timeout=_ZIP_TIMEOUT, opener=opener) as resp, \
+                        open(path, "wb") as out:
+                    shutil.copyfileobj(resp, out, 1 << 20)
+                with open(path, "rb") as src:
+                    return src.read()
+            except Exception as exc:
+                errors.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        raise RuntimeError("仓库快照下载失败: " + (errors[-1] if errors else ""))
+
     def _extract_from_zip(self, entry: dict, tmp: str, opener=None) -> bool:
         r = self._repo_coords(entry)
-        archive = zipfile.ZipFile(io.BytesIO(_http_get(
-            self._zip_url(entry), timeout=_ZIP_TIMEOUT, opener=opener)))
+        archive = zipfile.ZipFile(io.BytesIO(self._fetch_zip(entry, opener)))
         with archive:
             prefix = f"{r['repo']}-{r['branch']}/" + (f"{entry['path']}/"
                                                      if entry.get("path") else "")
@@ -491,11 +525,16 @@ class ModuleStore:
         return True
 
     def _fetch_files(self, entry: dict, tmp: str, opener=None) -> None:
-        failed = [rel for name, rel in self._module_files(entry)
-                  if not self._fetch_one(entry, name, os.path.join(
-                      tmp, *rel.split("/")), opener)]
+        failed = []
+        for name, rel in self._module_files(entry):
+            err = self._fetch_one(entry, name, os.path.join(
+                tmp, *rel.split("/")), opener)
+            if err:
+                failed.append(f"{rel}（{err}）")
         if failed:
-            raise RuntimeError("文件下载失败: " + "、".join(failed))
+            raise RuntimeError("文件下载失败: " + "、".join(failed[:4])
+                               + (f" …另有 {len(failed) - 4} 个"
+                                  if len(failed) > 4 else ""))
 
     @staticmethod
     def _module_files(entry: dict) -> list[tuple[str, str]]:
@@ -515,19 +554,25 @@ class ModuleStore:
         return pairs
 
     def _fetch_one(self, entry: dict, repo_path: str, target: str,
-                   opener=None) -> bool:
+                   opener=None) -> str:
+        """取一个文件：成功返回空串，失败返回最后一个错误。
+
+        wheel 动辄几十 MB，超时按「单次 socket 读」给足，并流式写盘而不是
+        整包读进内存。
+        """
+        last = ""
         for url in self._file_urls(entry, repo_path):
             try:
-                data = _http_get(url, timeout=_HTTP_TIMEOUT, opener=opener)
-            except Exception:
-                continue
-            parent = os.path.dirname(target)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(target, "wb") as f:
-                f.write(data)
-            return True
-        return False
+                with _open_url(url, timeout=_FILE_TIMEOUT, opener=opener) as resp:
+                    parent = os.path.dirname(target)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    with open(target, "wb") as f:
+                        shutil.copyfileobj(resp, f, 1 << 20)
+                return ""
+            except Exception as exc:
+                last = f"{_host(url)} {type(exc).__name__}: {exc}"
+        return last or "无可用下载源"
 
     def _refetch_missing(self, entry: dict, tmp: str, opener=None) -> None:
         """整仓 zip 里缺清单声明的文件时逐个补取。
@@ -542,9 +587,11 @@ class ModuleStore:
         self._log(f"模块 {entry['id']} 的仓库快照缺 "
                   f"{len(missing)} 个清单文件，逐个补取："
                   + "、".join(rel for _name, rel in missing))
-        failed = [rel for name, rel in missing
-                  if not self._fetch_one(entry, name, os.path.join(
-                      tmp, *rel.split("/")), opener)]
+        failed = []
+        for name, rel in missing:
+            if self._fetch_one(entry, name, os.path.join(tmp, *rel.split("/")),
+                               opener):
+                failed.append(rel)
         if failed:
             self._log(f"模块 {entry['id']} 仍有文件取不到（"
                       + "、".join(failed) + "），该模块功能可能不完整")

@@ -646,6 +646,54 @@ class DownloadTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.store.download("ghost")
 
+    def test_zip_fetch_retries_before_falling_back(self):
+        """整仓快照断流时先重连，几次都不行才回退逐文件。"""
+        self._fake_market("sample", "1.0.0", zip_ok=False)
+        self.store.fetch_market()
+        attempts: list[str] = []
+
+        def flaky(url, *, timeout, opener=None):
+            attempts.append(url)
+            raise OSError("IncompleteRead")
+
+        entry = self.store.entry("sample")
+        with unittest.mock.patch.object(module_store, "_open_url", flaky):
+            with self.assertRaises(RuntimeError):
+                self.store._fetch_zip(entry)
+        self.assertEqual(len(attempts), module_store._ZIP_RETRIES)
+        dest = self.store.download("sample")
+        self.assertTrue(os.path.isfile(os.path.join(dest, "plugin.py")))
+
+    def test_module_files_get_the_long_timeout(self):
+        """wheel 几十 MB，逐文件下载不能用清单那档 10 秒超时。"""
+        self._fake_market("sample", "1.0.0")
+        self.store.fetch_market()
+        seen: list[float] = []
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _n):
+                return b""
+
+        def fake_open(url, *, timeout, opener=None):
+            seen.append(timeout)
+            return Resp()
+
+        entry = self.store.entry("sample")
+        with unittest.mock.patch.object(module_store, "_open_url", fake_open):
+            err = self.store._fetch_one(
+                entry, "modules/sample/plugin.py",
+                os.path.join(self.tmp, "out", "plugin.py"))
+        self.assertEqual(err, "")
+        self.assertEqual(seen, [module_store._FILE_TIMEOUT])
+        self.assertGreater(module_store._FILE_TIMEOUT,
+                           module_store._HTTP_TIMEOUT)
+
     def test_requirements_from_txt_beats_meta(self):
         self._fake_market("sample", "1.0.0", requirements="python-osc>=1.9\n")
         self.store.fetch_market()
