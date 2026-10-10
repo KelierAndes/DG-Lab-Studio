@@ -862,8 +862,8 @@ class PluginManager:
                       or getattr(self._instances.get(module_id), "version", "") or "")
         settings = self.settings_for(module_id)
         marker = settings.get("_injected_profiles")
-        if isinstance(marker, dict) and str(marker.get("version") or "") == version:
-            return
+        # 标记只当「哪些名字是本模块注入的」所有权记录，不再做跳过依据：
+        # 配置文件夹被清空后标记仍在，按版本早退会让所有模块都不再注入
         done = marker if isinstance(marker, dict) else {}
         flow_done = [str(n) for n in done.get("flow") or []]
         bind_done = [str(n) for n in done.get("bindings") or []]
@@ -903,12 +903,13 @@ class PluginManager:
             # 「默认」映射始终存在：注入非默认命名的映射时当前配置不被带跑
             bind_known.setdefault("默认", {})
             binding_store.save_binding_profiles(bind_active, bind_known, bind_dir)
-        settings["_injected_profiles"] = {"version": version,
-                                          "flow": flow_done,
-                                          "bindings": bind_done}
-        if hasattr(settings, "save"):
-            settings.save()
-        self.engine.events.emit("profiles_changed", module_id)
+        if flows or binds:
+            settings["_injected_profiles"] = {"version": version,
+                                              "flow": flow_done,
+                                              "bindings": bind_done}
+            if hasattr(settings, "save"):
+                settings.save()
+            self.engine.events.emit("profiles_changed", module_id)
 
     def _module_profile_names(self, module_id: str) -> tuple[list[str], list[str]]:
         """模块默认配置的登记名（flow / bindings 文件名，去 .json）。
@@ -1080,11 +1081,6 @@ class PluginManager:
             self._meta[module_id]["loaded"] = False
             self._meta[module_id]["running"] = False
         self._purge_module_cache(module_id)
-        try:
-            self.remove_module_profiles(module_id)
-        except Exception:
-            self.engine._log(f"模块 {module_id} 默认配置移除失败:\n"
-                             f"{traceback.format_exc()}")
         self._detach_deps_path(module_id)
         self.engine._log(f"模块已卸载: {inst.name or module_id}")
         self.engine.events.emit("modules_changed", module_id)
@@ -1202,16 +1198,32 @@ class PluginManager:
         await self._ensure_dependencies(module_id)
         self.set_enabled(module_id, True)
         await self.start(module_id)
+        try:
+            self.inject_module_profiles(module_id)
+        except Exception:
+            self.engine._log(f"模块 {module_id} 默认配置注入失败:\n"
+                             f"{traceback.format_exc()}")
 
     async def prepare(self, module_id: str) -> None:
         """下载后自动装载但不启用：依赖就绪并加载实例，不 start、不置开机自启。"""
         await self._ensure_dependencies(module_id)
         self.set_enabled(module_id, False)
         self.load(module_id)
+        try:
+            self.inject_module_profiles(module_id)
+        except Exception:
+            self.engine._log(f"模块 {module_id} 默认配置注入失败:\n"
+                             f"{traceback.format_exc()}")
 
     async def uninstall(self, module_id: str) -> None:
         self.set_enabled(module_id, False)
         await self.unload(module_id)
+        # 模块文件即将删除：它的默认配置从可选列表移除（正在用的切回「默认」）
+        try:
+            self.remove_module_profiles(module_id)
+        except Exception:
+            self.engine._log(f"模块 {module_id} 默认配置移除失败:\n"
+                             f"{traceback.format_exc()}")
 
     def delete_module(self, module_id: str) -> None:
         if module_id in self._instances:

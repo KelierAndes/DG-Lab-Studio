@@ -629,19 +629,26 @@ class FlowyModule:
         self.assertEqual(bind_active, "默认按键")
         self.assertEqual(binds["默认按键"], {"13": "fire"})
 
-    def test_unload_removes_injected_profiles_and_clears_marker(self):
-        """模块停用后其默认配置移出可选列表，正在用的自动切回「默认」。"""
+    def test_uninstall_removes_injected_profiles_and_clears_marker(self):
+        """卸载时默认配置移出可选列表，正在用的自动切回「默认」。
+
+        只是停用（卸载实例）不动配置：配置跟「安装」这一生命周期走。
+        """
         import asyncio
         self._write_profile_module("0.1.0", 42.0)
         self.manager.discover()
         self.manager.load("flowy")
         # 先把当前配置切到模块默认那份，模拟用户正在用它
-        notes = self.manager.apply_module_default_profiles("flowy")
+        self.manager.apply_module_default_profiles("flowy")
         active, profiles = self.EF.load_profiles(self.flow_dir)
         self.assertEqual(active, "默认接线")
         bind_active, binds = self.bs.load_binding_profiles(self.bind_dir)
         self.assertEqual(bind_active, "默认按键")
+        # 停用不移除：配置跟安装走
         asyncio.run(self.manager.unload("flowy"))
+        self.assertIn("默认接线", self.EF.load_profiles(self.flow_dir)[1])
+        # 卸载才移除
+        asyncio.run(self.manager.uninstall("flowy"))
         active, profiles = self.EF.load_profiles(self.flow_dir)
         self.assertNotIn("默认接线", profiles)
         self.assertEqual(active, "默认")
@@ -654,6 +661,22 @@ class FlowyModule:
         self.manager.load("flowy")
         _active, profiles = self.EF.load_profiles(self.flow_dir)
         self.assertIn("默认接线", profiles)
+
+    def test_inject_recovers_after_config_wipe(self):
+        """配置文件夹被清空后标记仍在：再装载必须照样补注，不能按版本早退。"""
+        import shutil
+        self._write_profile_module("0.1.0", 42.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        shutil.rmtree(self.flow_dir)
+        shutil.rmtree(self.bind_dir)
+        import asyncio
+        asyncio.run(self.manager.unload("flowy"))
+        self.manager.load("flowy")
+        _active, profiles = self.EF.load_profiles(self.flow_dir)
+        self.assertIn("默认接线", profiles)
+        _bind_active, binds = self.bs.load_binding_profiles(self.bind_dir)
+        self.assertIn("默认按键", binds)
 
     def test_apply_does_not_switch_bindings_without_default_named(self):
         """非「默认」命名的按键映射只登记为可选，不切换当前配置。"""
