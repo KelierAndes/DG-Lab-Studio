@@ -139,6 +139,12 @@ def copy_modules(src: Path, dst: Path) -> None:
             continue
         target = dst / entry.name
         if entry.is_dir():
+            if not (entry / "plugin.py").is_file():
+                # 残缺的模块目录（比如只剩 flow/ 的手工副本）会顶掉 dist 里
+                # 完整的已下载模块：缺 plugin.py 的不随包，留给出处重建
+                print(f"warning: skip incomplete module dir (no plugin.py): "
+                      f"{entry}")
+                continue
             if target.exists():
                 shutil.rmtree(target)
             shutil.copytree(entry, target, ignore=ignore)

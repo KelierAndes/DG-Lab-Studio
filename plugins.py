@@ -778,7 +778,13 @@ class PluginManager:
         self._attach_deps_path(module_id)
         try:
             cls = _load_plugin_class(module_id, plugin_py)
-        except ImportError:
+        except ImportError as exc:
+            if f"modules.{module_id}" in str(exc):
+                # 模块自己的子模块导不进来：文件残缺，不是缺第三方依赖
+                self.engine._log(
+                    f"模块 {module_id} 装载失败（模块文件残缺，"
+                    f"请删除后到模块页重新下载）:\n{traceback.format_exc()}")
+                raise
             self.engine._log(
                 f"模块 {module_id} 装载失败（可能缺依赖，"
                 f"请在模块页「安装并启动」自动补装）:\n{traceback.format_exc()}")

@@ -629,16 +629,23 @@ class DownloadTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(dest, "plugin.py")))
         self.assertTrue(os.path.isfile(os.path.join(dest, "bin", "payload.dll")))
 
-    def test_download_keeps_going_when_a_file_is_unreachable(self):
-        """仓库里也取不到的文件只报告警，不该把整个模块的安装挡掉。"""
+    def test_download_fails_loudly_when_a_file_is_unreachable(self):
+        """仓库里也取不到的清单文件：整次安装失败，绝不落地残缺模块。
+
+        残缺模块比安装失败更糟——margin_control 就装上过一份缺 bridge.py 的
+        目录，装载时报 ImportError 还被误报成「可能缺依赖」。
+        """
         self._fake_market("sample", "1.0.0", extra_declared=("bin/gone.dll",))
         os.remove(os.path.join(self.repo_files, "modules", "sample", "bin",
                                "gone.dll"))
         self.store.fetch_market()
-        dest = self.store.download("sample")
-        self.assertTrue(os.path.isfile(os.path.join(dest, "plugin.py")))
-        self.assertFalse(os.path.exists(os.path.join(dest, "bin", "gone.dll")))
-        self.assertTrue(any("取不到" in msg for msg in self.engine._logs))
+        with self.assertRaises(RuntimeError) as ctx:
+            self.store.download("sample")
+        self.assertIn("下载不完整", str(ctx.exception))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.modules_root, "sample", "plugin.py")))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.modules_root, "sample") + ".downloading"))
 
     def test_download_unknown_module_raises(self):
         self._fake_market("sample", "1.0.0")

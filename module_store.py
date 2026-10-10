@@ -464,6 +464,21 @@ class ModuleStore:
         tmp = dest + ".downloading"
         shutil.rmtree(tmp, ignore_errors=True)
         os.makedirs(tmp, exist_ok=True)
+        try:
+            return self._download_locked(entry, dest, tmp)
+        except BaseException:
+            # 失败不留 .downloading 残骸，也别把 dest 挪去 .old 后一走了之
+            shutil.rmtree(tmp, ignore_errors=True)
+            old = dest + ".old"
+            if os.path.isdir(dest) and not os.listdir(dest) \
+                    and os.path.isdir(old):
+                try:
+                    os.rename(old, dest)
+                except OSError:
+                    pass
+            raise
+
+    def _download_locked(self, entry: dict, dest: str, tmp: str) -> str:
         opener = self._network_opener()
         got_zip = False
         try:
@@ -475,7 +490,7 @@ class ModuleStore:
         else:
             self._refetch_missing(entry, tmp, opener)
         if not os.path.isfile(os.path.join(tmp, "plugin.py")):
-            raise RuntimeError(f"模块 {module_id} 下载不完整（缺 plugin.py）")
+            raise RuntimeError(f"模块 {entry['id']} 下载不完整（缺 plugin.py）")
         old = dest + ".old"
         shutil.rmtree(old, ignore_errors=True)
         if os.path.isdir(dest):
@@ -621,8 +636,11 @@ class ModuleStore:
                                opener):
                 failed.append(rel)
         if failed:
-            self._log(f"模块 {entry['id']} 仍有文件取不到（"
-                      + "、".join(failed) + "），该模块功能可能不完整")
+            # 残缺模块比安装失败更糟：缺的是 plugin.py 以外的文件时上面那个
+            # 完整性检查兜不住，装上去运行时才炸。这里直接让本次安装失败。
+            raise RuntimeError(
+                f"模块 {entry['id']} 下载不完整（{'、'.join(failed)} 取不到），"
+                "请稍后重试或配置镜像 / 代理")
 
 
     def deps_dir(self, module_id: str) -> str:
