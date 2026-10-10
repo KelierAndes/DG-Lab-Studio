@@ -629,6 +629,46 @@ class FlowyModule:
         self.assertEqual(bind_active, "默认按键")
         self.assertEqual(binds["默认按键"], {"13": "fire"})
 
+    def test_unload_removes_injected_profiles_and_clears_marker(self):
+        """模块停用后其默认配置移出可选列表，正在用的自动切回「默认」。"""
+        import asyncio
+        self._write_profile_module("0.1.0", 42.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        # 先把当前配置切到模块默认那份，模拟用户正在用它
+        notes = self.manager.apply_module_default_profiles("flowy")
+        active, profiles = self.EF.load_profiles(self.flow_dir)
+        self.assertEqual(active, "默认接线")
+        bind_active, binds = self.bs.load_binding_profiles(self.bind_dir)
+        self.assertEqual(bind_active, "默认按键")
+        asyncio.run(self.manager.unload("flowy"))
+        active, profiles = self.EF.load_profiles(self.flow_dir)
+        self.assertNotIn("默认接线", profiles)
+        self.assertEqual(active, "默认")
+        bind_active, binds = self.bs.load_binding_profiles(self.bind_dir)
+        self.assertNotIn("默认按键", binds)
+        self.assertEqual(bind_active, "默认")
+        # 注入标记已清：重新装载会重新注入
+        self.assertNotIn("_injected_profiles",
+                         self.manager.settings_for("flowy"))
+        self.manager.load("flowy")
+        _active, profiles = self.EF.load_profiles(self.flow_dir)
+        self.assertIn("默认接线", profiles)
+
+    def test_apply_does_not_switch_bindings_without_default_named(self):
+        """非「默认」命名的按键映射只登记为可选，不切换当前配置。"""
+        self._write_profile_module("0.1.0", 42.0)
+        # 改名模块的按键映射文件：头像开火键这类分发的映射不该被自动套用
+        folder = os.path.join(self._roots.root, "flowy", "bindings")
+        os.rename(os.path.join(folder, "默认按键.json"),
+                  os.path.join(folder, "自定义按键.json"))
+        self.manager.discover()
+        self.manager.load("flowy")
+        self.manager.apply_module_default_profiles("flowy")
+        bind_active, binds = self.bs.load_binding_profiles(self.bind_dir)
+        self.assertIn("自定义按键", binds)
+        self.assertEqual(bind_active, "默认")
+
     def test_apply_defaults_without_files_says_so(self):
         self.manager.discover()
         notes = self.manager.apply_module_default_profiles("dummy")

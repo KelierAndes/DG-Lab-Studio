@@ -900,12 +900,87 @@ class PluginManager:
             self.engine._log(
                 f"模块 {module_id} 的默认按键映射已登记为可选配置：「{name}」")
         if binds:
+            # 「默认」映射始终存在：注入非默认命名的映射时当前配置不被带跑
+            bind_known.setdefault("默认", {})
             binding_store.save_binding_profiles(bind_active, bind_known, bind_dir)
         settings["_injected_profiles"] = {"version": version,
                                           "flow": flow_done,
                                           "bindings": bind_done}
         if hasattr(settings, "save"):
             settings.save()
+        self.engine.events.emit("profiles_changed", module_id)
+
+    def _module_profile_names(self, module_id: str) -> tuple[list[str], list[str]]:
+        """模块默认配置的登记名（flow / bindings 文件名，去 .json）。
+
+        模块目录不在（已卸载）时退回注入清单里记录的名字。
+        """
+        folder = self.module_dir(module_id) or ""
+        names: dict[str, list[str]] = {"flow": [], "bindings": []}
+        for kind in names:
+            kind_dir = os.path.join(folder, kind)
+            if os.path.isdir(kind_dir):
+                names[kind] = [f[:-len(".json")] for f in sorted(os.listdir(kind_dir))
+                               if f.endswith(".json")]
+        if not names["flow"] and not names["bindings"]:
+            done = self.settings_for(module_id).get("_injected_profiles") or {}
+            if isinstance(done, dict):
+                names["flow"] = [str(n) for n in done.get("flow") or []]
+                names["bindings"] = [str(n) for n in done.get("bindings") or []]
+        return names["flow"], names["bindings"]
+
+    def remove_module_profiles(self, module_id: str) -> None:
+        """模块停用后把它的默认配置从可选列表移除，正在使用的自动切回「默认」。
+
+        移除名单 = 模块自带的配置文件名 ∪ 注入清单里记过的名字（模块目录可能
+        已被卸载流程清掉）。移除后清掉注入标记，下次装载会重新注入。
+        """
+        flows, binds = self._module_profile_names(module_id)
+        if not flows and not binds:
+            return
+        changed = False
+        if flows:
+            flow_dir = event_flow.profiles_dir(self._config_dir())
+            active, known = event_flow.load_profiles(flow_dir)
+            removed = [n for n in flows if n in known]
+            for name in removed:
+                known.pop(name, None)
+            if removed:
+                if active not in known:
+                    active = "默认" if "默认" in known else next(iter(known), "默认")
+                event_flow.save_profiles(active, known, flow_dir)
+                runtime = getattr(getattr(self.engine, "flow", None), "runtime", None)
+                if runtime is not None and getattr(runtime, "flow_dir", "") == flow_dir:
+                    for name in removed:
+                        runtime.profiles.pop(name, None)
+                    if runtime.active not in runtime.profiles:
+                        runtime.switch_profile(active)
+                self.engine._log(
+                    f"模块 {module_id} 的默认事件流已从可选列表移除"
+                    f"（{'、'.join(removed)}）")
+                changed = True
+        if binds:
+            bind_dir = binding_store.bindings_dir(self._config_dir())
+            bind_active, bind_known = binding_store.load_binding_profiles(bind_dir)
+            removed = [n for n in binds if n in bind_known]
+            for name in removed:
+                bind_known.pop(name, None)
+            if removed:
+                if bind_active not in bind_known:
+                    bind_active = "默认" if "默认" in bind_known \
+                        else next(iter(bind_known), "默认")
+                binding_store.save_binding_profiles(bind_active, bind_known,
+                                                    bind_dir)
+                self.engine._log(
+                    f"模块 {module_id} 的默认按键映射已从可选列表移除"
+                    f"（{'、'.join(removed)}）")
+                changed = True
+        if changed:
+            settings = self.settings_for(module_id)
+            settings.pop("_injected_profiles", None)
+            if hasattr(settings, "save"):
+                settings.save()
+            self.engine.events.emit("profiles_changed", module_id)
 
     def apply_module_default_profiles(self, module_id: str) -> list[str]:
         """模块卡片「快捷配置」：把模块自带的默认配置套用为当前配置。
@@ -947,13 +1022,21 @@ class PluginManager:
             restored = [n for n, _ in binds if n not in bind_known]
             for name, rows in binds:
                 bind_known.setdefault(name, rows)
-            bind_target = next((n for n, _ in binds if n.startswith("默认")),
-                               binds[0][0])
-            binding_store.save_binding_profiles(bind_target, bind_known, bind_dir)
-            note = f"模块 {module_id} 的按键映射已套用默认配置「{bind_target}」"
+            # 按键映射只在模块明确带「默认*」命名的配置时才切换：
+            # 其他映射文件（如按用户要求分发的）只登记为可选，不动当前配置
+            bind_target = next((n for n, _ in binds if n.startswith("默认")), None)
+            bind_known.setdefault("默认", {})
+            binding_store.save_binding_profiles(
+                bind_target or bind_active, bind_known, bind_dir)
+            if bind_target is not None:
+                note = f"模块 {module_id} 的按键映射已套用默认配置「{bind_target}」"
+            else:
+                note = (f"模块 {module_id} 的按键映射已登记为可选配置"
+                        f"（{'、'.join(n for n, _ in binds)}），当前配置未切换")
             if restored:
                 note += f"（补回缺失的 {'、'.join(restored)}）"
             notes.append(note)
+        self.engine.events.emit("profiles_changed", module_id)
         return notes
 
     def _unregister_actions(self, module_id: str) -> None:
@@ -997,6 +1080,11 @@ class PluginManager:
             self._meta[module_id]["loaded"] = False
             self._meta[module_id]["running"] = False
         self._purge_module_cache(module_id)
+        try:
+            self.remove_module_profiles(module_id)
+        except Exception:
+            self.engine._log(f"模块 {module_id} 默认配置移除失败:\n"
+                             f"{traceback.format_exc()}")
         self._detach_deps_path(module_id)
         self.engine._log(f"模块已卸载: {inst.name or module_id}")
         self.engine.events.emit("modules_changed", module_id)

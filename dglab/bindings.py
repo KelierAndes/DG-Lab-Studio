@@ -68,9 +68,10 @@ def load_binding_profiles(directory: str | None = None
             rows = data.get("bindings") if isinstance(data.get("bindings"), dict) \
                 else {k: v for k, v in data.items()
                       if isinstance(k, str) and isinstance(v, str)}
-            if name and rows:
+            if name:
+                # 空映射也认：「默认」可以是零绑定，注入非默认映射时它兜住 active
                 profiles[name] = {str(bit): str(binding)
-                                  for bit, binding in rows.items()}
+                                  for bit, binding in (rows or {}).items()}
     if not profiles:
         return "默认", {}
     index = _read_json(os.path.join(directory, _INDEX_FILE))
@@ -110,6 +111,6 @@ def save_binding_profiles(active: str, profiles: dict[str, dict[str, str]],
     if active not in profiles:
         active = next(iter(profiles), "默认")
     ok = _write_json(os.path.join(directory, _INDEX_FILE),
-                     {"version": 1, "active": active,
+                     {"version": 1, "active": str(active),
                       "order": list(profiles)}) and ok
     return ok

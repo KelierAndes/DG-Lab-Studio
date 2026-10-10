@@ -424,6 +424,9 @@ class FlowPage(XamlClass, Page):
         self.status_until = 0.0
         self.usage: dict[str, int] = {}
         self._mouse = (0.0, 0.0)
+        # 模块注入 / 移除默认配置后配置下拉要跟着变：事件在引擎线程发，
+        # 经 ui_queue 折回 UI 线程再重建页面
+        self.engine.events.on("profiles_changed", self._on_profiles_changed)
 
         self._paint: Painter | None = None
         self._layouts: dict[str, NodeLayout] = {}
@@ -594,6 +597,12 @@ class FlowPage(XamlClass, Page):
         self._update_tabs()
         self._layouts.clear()
         self._invalidate()
+
+    def _on_profiles_changed(self, module_id=None) -> None:
+        try:
+            self.shell.ui_queue.put(self.rebuild)
+        except Exception as exc:
+            self.shell.logs.append(f"配置列表刷新失败: {exc!r}")
 
     # ------------------------------------------------------------- 配置文件
     def _profile_selector(self) -> object:
