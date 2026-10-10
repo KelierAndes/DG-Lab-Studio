@@ -8,7 +8,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from module_store import wheel_abi_ok
+from module_store import stale_wheels
 
 from dglab.version import APP_VERSION
 
@@ -26,6 +26,9 @@ def main() -> int:
     version = APP_VERSION
     if "--version" in sys.argv:
         version = sys.argv[sys.argv.index("--version") + 1]
+    if not check_bundled_wheels(ROOT / "modules",
+                                allow_stale="--allow-stale-wheels" in sys.argv):
+        return 2
     backup_dir = ROOT / "_research" / "_runtime_backup"
     backup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -62,7 +65,6 @@ def main() -> int:
         merge_downloaded(APP_DIR / "modules", ROOT / "modules",
                          backup_dir / "modules_backup")
         ensure_python_payload(APP_DIR)
-        warn_stale_wheels(ROOT / "modules")
         make_release_zip(APP_DIR, version)
     finally:
         # 无论构建在哪一步失败，都要把运行时文件放回去——否则一次
@@ -204,18 +206,42 @@ def _payload_version() -> str:
     return ".".join(str(part) for part in sys.version_info[:3])
 
 
-def warn_stale_wheels(modules_dir: Path) -> None:
-    """随包 wheel 与内置 Python ABI 不符时在构建期提醒（运行时会跳过并联网安装）。"""
+def check_bundled_wheels(modules_dir: Path, *, allow_stale: bool) -> bool:
+    """随包 wheel 必须适配内置 Python：wheels/ 里 ABI 不符就别发布。
+
+    wheels/ 会被宿主解进模块的 _deps 当离线依赖，一旦与内置 Python 不符就只能
+    联网 pip，网络侧出任何问题（镜像不通、证书过期、离线机器）都是「依赖安装
+    失败」；ocr_wheels/ 只喂内置解释器，不适配不过是识别回退模板法，提醒即可。
+    """
     running = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    for wheels in sorted(modules_dir.glob("*/wheels")):
-        stale = [p.name for p in sorted(wheels.glob("*.whl"))
-                 if not wheel_abi_ok(p.name)]
-        if stale:
-            print(f"warning: {wheels.parent.name}/wheels 有 {len(stale)} 个 wheel "
-                  f"与内置 Python {_payload_version()}（{running}）ABI 不符，"
-                  "运行时会跳过并从网络安装；发布前建议换成对应版本 wheel：")
-            for name in stale:
-                print(f"  - {name}")
+    fatal: list[str] = []
+    for sub in ("wheels", "ocr_wheels"):
+        for folder in sorted(p for p in modules_dir.glob(f"*/{sub}")
+                             if p.is_dir()):
+            stale = stale_wheels(str(folder))
+            if not stale:
+                continue
+            label = f"{folder.parent.name}/{sub}"
+            line = (f"{label} 有 {len(stale)} 个 wheel 与内置 Python "
+                    f"{_payload_version()}（{running}）ABI 不符："
+                    + "、".join(stale))
+            if sub == "wheels":
+                fatal.append(line)
+            else:
+                print(f"warning: {line}")
+    if not fatal:
+        return True
+    for line in fatal:
+        print(f"error: {line}")
+    if allow_stale:
+        print("已指定 --allow-stale-wheels：继续构建（打包版装这些模块要联网）")
+        return True
+    print("请把这些 wheel 换成内置 Python 对应的版本，例如：\n"
+          f"  pip download --only-binary=:all: --python-version "
+          f"{sys.version_info.major}{sys.version_info.minor} --abi {running} "
+          "--platform win_amd64 -d <模块>/wheels <包名>\n"
+          "或临时用 --allow-stale-wheels 跳过本检查")
+    return False
 
 
 if __name__ == "__main__":

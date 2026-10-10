@@ -193,9 +193,9 @@ class EmbeddedPythonTests(unittest.TestCase):
             ok, out = pip_install(["python-osc>=1.9"], target=target)
         self.assertTrue(ok)
         self.assertEqual(out, "ok")
-        self.assertEqual(seen["cmd"][:5],
+        self.assertEqual(seen["cmd"][:7],
                          [os.path.join(py_dir, "python.exe"), "-X", "utf8",
-                          "-m", "pip"])
+                          "-E", "-s", "-m", "pip"])
         self.assertIn("--target", seen["cmd"])
         self.assertEqual(seen["cmd"][seen["cmd"].index("--target") + 1],
                          target)
@@ -216,6 +216,10 @@ class EmbeddedPythonTests(unittest.TestCase):
                                    target=os.path.join(base, "_deps"))
         self.assertTrue(ok)
         self.assertIn("--no-deps", seen["cmd"])
+        # -E -s：内置 Python 不能串到宿主机的用户级 site-packages，否则 pip
+        # 报「already satisfied」而跳过安装，换台干净机器就缺依赖
+        self.assertIn("-E", seen["cmd"])
+        self.assertIn("-s", seen["cmd"])
 
     def test_frozen_install_without_runtime_reports_error(self):
         base = tempfile.mkdtemp(prefix="dgstudio_embedpy_")

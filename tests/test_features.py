@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -12,6 +13,20 @@ from dglab.state import StateEvents
 from dglab.waves import CONTINUOUS, SILENT
 
 from test_ble_multi import FakeBleakClient, _make_client
+
+
+async def _settled(cond, timeout: float = 5.0) -> bool:
+    """等引擎线程把派发的回调跑完。
+
+    按键派发在引擎自己的线程上，测试这里是跨线程观察：固定 sleep 在整机繁忙时
+    会比回调先醒，偶发变成「一条都没派发」的假失败。
+    """
+    deadline = time.monotonic() + timeout
+    while not cond():
+        if time.monotonic() > deadline:
+            return False
+        await asyncio.sleep(0.02)
+    return True
 
 
 class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
@@ -377,13 +392,13 @@ class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
             engine._on_ovc_button("addr-ovc", 13)
             engine._on_ovc_button("addr-ovc", 12)
             engine._on_ovc_button("addr-ovc", 11)
-            await asyncio.sleep(0.3)
+            await _settled(lambda: len(started) == 3)
             self.assertEqual(started, [("addr-ovc", None), ("addr-ovc", "A"),
                                        ("addr-ovc", "B")])
             engine._on_ovc_button_up("addr-ovc", 13)
             engine._on_ovc_button_up("addr-ovc", 12)
             engine._on_ovc_button_up("addr-ovc", 11)
-            await asyncio.sleep(0.3)
+            await _settled(lambda: len(stopped) == 3)
             self.assertEqual(stopped, [("addr-ovc", None), ("addr-ovc", "A"),
                                        ("addr-ovc", "B")])
         finally:
@@ -404,7 +419,8 @@ class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
                 self._set_profile(engine, {"13": "key:F1"})
                 engine._on_ovc_button("addr-ovc", 13)
                 engine._on_ovc_button_up("addr-ovc", 13)
-                await asyncio.sleep(0.2)
+                await _settled(lambda: len(pressed) == 1
+                                and len(released) == 1)
                 self.assertEqual(pressed, ["F1"])
                 self.assertEqual(released, ["F1"])
             finally:
@@ -961,7 +977,7 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
             engine._on_ovc_button("addr-ovc", 13)
             bindings["13"] = "b_strength_down"
             engine._on_ovc_button("addr-ovc", 13)
-            await asyncio.sleep(0.3)
+            await _settled(lambda: len(calls) == 2)
             self.assertEqual(calls, [("A", 1, "addr-ovc"), ("B", -1, "addr-ovc")])
         finally:
             engine.stop()
@@ -1040,7 +1056,7 @@ class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
             engine._on_ovc_button("addr-ovc", 13)
             bindings["13"] = "b_wave_down"
             engine._on_ovc_button("addr-ovc", 13)
-            await asyncio.sleep(0.3)
+            await _settled(lambda: len(waves) == 2)
             from dglab.waves import wave_order
             self.assertEqual(waves, [("A", CONTINUOUS),
                                      ("B", wave_order("OVC")[-1])])

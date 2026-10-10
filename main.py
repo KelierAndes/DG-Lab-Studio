@@ -356,6 +356,39 @@ def _osc_row_probe(runtime, engine) -> tuple[bool, str]:
     return True, ""
 
 
+def _module_wheels_probe(engine) -> tuple[bool, str]:
+    """自检：模块随包 wheel 必须适配当前解释器 ABI，装依赖才不靠网络。
+
+    cp312 那批 wheel 混在 wheels/ 里时，宿主装模块就退化成联网 pip；网络一侧
+    出任何问题（证书过期、镜像不通、离线机器）都是「依赖安装失败」。OCR 用的
+    ocr_wheels/ 只喂内置解释器，不适配只会让识别回退模板法，记为提醒不算失败。
+    """
+    import module_store
+    from plugins import module_roots
+
+    offenders: list[str] = []
+    notes: list[str] = []
+    for root in module_roots():
+        if not os.path.isdir(root):
+            continue
+        for name in sorted(os.listdir(root)):
+            folder = os.path.join(root, name)
+            if not os.path.isfile(os.path.join(folder, "plugin.py")):
+                continue
+            stale = module_store.stale_wheels(os.path.join(folder, "wheels"))
+            if stale:
+                offenders.append(f"{name}/wheels={stale}")
+            if not module_store.deps_abi_ok(os.path.join(folder, "_deps")):
+                offenders.append(f"{name}/_deps ABI 不符")
+            ocr = module_store.stale_wheels(
+                os.path.join(folder, "ocr_wheels"))
+            if ocr:
+                notes.append(f"{name}/ocr_wheels={ocr}")
+    if offenders:
+        return False, "；".join(offenders)
+    return True, ("提醒：" + "；".join(notes)) if notes else ""
+
+
 def _ef_tag(row) -> str:
     head = str(row.get("source") or "").split("（")[0].strip()
     return "" if head in ("", "核心", "临时变量") else head
@@ -491,6 +524,13 @@ def _run_selftest() -> None:
                         osc_ok, osc_note = False, f"raised {exc!r}"
                     REPORT["flow_osc_rows_ok"] = osc_ok
                     REPORT["flow_osc_rows_dbg"] = osc_note
+                    try:
+                        wheels_ok, wheels_note = _module_wheels_probe(
+                            win.engine)
+                    except Exception as exc:
+                        wheels_ok, wheels_note = False, f"raised {exc!r}"
+                    REPORT["flow_module_wheels_ok"] = wheels_ok
+                    REPORT["flow_module_wheels_dbg"] = wheels_note
                     REPORT["flow_var_table_ok"] = (
                         rt.add_user_var("SelfTestVar") == ""
                         and any(r["name"] == "SelfTestVar"

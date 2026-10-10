@@ -196,9 +196,12 @@ def pip_install(requirements: list[str], target: str | None = None,
                 ok, out = False, ("内置 Python 运行时缺失（exe 旁 _python/），"
                                   "无法安装依赖；请用 build_exe.py 重新打包")
             else:
+                # -E -s：只认内置 Python 自己的 site-packages。开发机上用户级
+                # %APPDATA%\Python\... 里的同名包会让 pip 说「already satisfied」
+                # 而跳过安装，换一台干净机器就少依赖。
                 ok, out = _run_pip(
                     [os.path.join(runtime, "python.exe"), "-X", "utf8",
-                     "-m", "pip", *args], env)
+                     "-E", "-s", "-m", "pip", *args], env)
         else:
             ok, out = _run_pip([sys.executable, "-m", "pip", *args], env)
         if log is not None:
