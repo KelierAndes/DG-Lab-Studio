@@ -359,6 +359,7 @@ class BleClient:
         self._publish()
 
     async def _bmtr_keepalive(self, session: BleSession) -> None:
+        ticks = 0
         try:
             while True:
                 await asyncio.sleep(1.0)
@@ -366,7 +367,11 @@ class BleClient:
                     return
                 await self._write(session, build_bmtr_50(enable_pressure=True,
                                                               color=session.led_color))
-                self._log_d0_stats(session)
+                ticks += 1
+                if ticks % 30 == 0:
+                    # 保活写保持每秒一次，统计日志降到 30s 一条：
+                    # 日志页每来一条就全量重建列表，1s 一条也扛不住
+                    self._log_d0_stats(session)
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -412,11 +417,14 @@ class BleClient:
             entry = stats.setdefault(uuid, [0, b""])
             entry[0] += 1
             entry[1] = bytes(data)
-            key = bytes(data).hex().upper()
             logged = session.__dict__.setdefault("_raw_logged", {})
-            logged[key] = logged.get(key, 0) + 1
-            if logged[key] <= 3:
-                self._log(f"{session.slot_id} 通知帧({len(data)}B): {key}")
+            shape = f"{uuid}/{len(data)}B"
+            if shape not in logged:
+                # 只记每种帧形状的首帧：气压这类模拟量帧内容连续变化，
+                # 按帧值去重等于每帧都是新值，照样每秒刷几十条
+                logged[shape] = True
+                self._log(f"{session.slot_id} 通知帧({len(data)}B) [{uuid}]: "
+                          + bytes(data).hex().upper())
             pressure = parse_bmtr_pressure(data)
             if pressure is not None:
                 self._slot(session).pressure = pressure

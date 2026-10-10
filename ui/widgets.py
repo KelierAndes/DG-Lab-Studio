@@ -231,7 +231,11 @@ def rows(*heights: GridLength) -> Grid:
 
 def symbol_icon(name: str, *, size: float = 16, color: str = "text2") -> SymbolIcon:
     ic = SymbolIcon()
-    ic.Symbol = getattr(Symbol, name)
+    try:
+        ic.Symbol = getattr(Symbol, name)
+    except AttributeError:
+        # Symbol 是固定枚举：写错符号名不能炸掉整页，回退到中性图标
+        ic.Symbol = getattr(Symbol, "Setting")
     ic.FontSize = size
     ic.Foreground = theme.brush(color)
     return ic

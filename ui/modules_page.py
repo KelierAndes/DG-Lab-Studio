@@ -233,7 +233,7 @@ class ModulesPage(XamlClass, Page):
                 buttons.Children.Append(W.text_button("启动", symbol="Play",
                                                       accent=True,
                                                       on_click=lambda s, e, mid=module_id: self._install(mid)))
-            buttons.Children.Append(W.text_button("快捷配置", symbol="Magic",
+            buttons.Children.Append(W.text_button("快捷配置", symbol="Accept",
                                                   on_click=lambda s, e, mid=module_id: self._apply_defaults(mid)))
             buttons.Children.Append(W.text_button("卸载", symbol="Remove",
                                                   on_click=lambda s, e, mid=module_id: self._uninstall(mid)))
