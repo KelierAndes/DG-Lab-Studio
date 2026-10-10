@@ -443,6 +443,26 @@ class BindingProfileCheckTests(unittest.TestCase):
             if os.path.exists(path):
                 os.remove(path)
 
+    def test_control_page_binding_writes_persist(self):
+        """控制页写绑定必须落盘：存储层读出的临时字典不能写完就扔。"""
+        from ui import control_page as cp
+
+        page = cp.ControlPage.__new__(cp.ControlPage)
+
+        class _Shell:
+            pass
+
+        shell = _Shell()
+        shell.engine = self.engine
+        page.shell = shell
+        page._write_binding(13, "osc:/avatar/parameters/Trigger")
+        active, profiles = self.engine.binding_profiles()
+        self.assertEqual(profiles[active].get("13"),
+                         "osc:/avatar/parameters/Trigger")
+        page._write_binding(13, "key:F5")
+        _active, profiles = self.engine.binding_profiles()
+        self.assertEqual(profiles[active].get("13"), "key:F5")
+
     def test_missing_detection_without_loaded_module(self):
         missing = self.engine.binding_missing_modules({
             "13": "osc:/avatar/parameters/X",
@@ -587,6 +607,33 @@ class FlowyModule:
         row = profiles["默认接线"][self.EF.PAGE_INPUT]
         self.assertEqual(row.nodes, [])
         self.assertTrue(any("同名" in line for line in self.engine._logs))
+
+    def test_apply_defaults_restores_and_switches(self):
+        """快捷配置：默认配置被删后一键补回并切为当前配置。"""
+        import os
+        self._write_profile_module("0.1.0", 42.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        # 用户删掉了模块默认的那两份配置
+        os.remove(os.path.join(self.flow_dir, "默认接线.json"))
+        os.remove(os.path.join(self.bind_dir, "默认按键.json"))
+        self.assertEqual(list(self.EF.load_profiles(self.flow_dir)[1]), ["默认"])
+        notes = self.manager.apply_module_default_profiles("flowy")
+        self.assertTrue(any("默认接线" in n for n in notes), notes)
+        self.assertTrue(any("默认按键" in n for n in notes), notes)
+        active, profiles = self.EF.load_profiles(self.flow_dir)
+        self.assertEqual(active, "默认接线")
+        self.assertAlmostEqual(
+            profiles["默认接线"][self.EF.PAGE_INPUT].nodes[0].params["v"], 42.0)
+        bind_active, binds = self.bs.load_binding_profiles(self.bind_dir)
+        self.assertEqual(bind_active, "默认按键")
+        self.assertEqual(binds["默认按键"], {"13": "fire"})
+
+    def test_apply_defaults_without_files_says_so(self):
+        self.manager.discover()
+        notes = self.manager.apply_module_default_profiles("dummy")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("没有自带默认配置", notes[0])
 
     def test_version_bump_overwrites_own_injection(self):
         self._write_profile_module("0.1.0", 42.0)

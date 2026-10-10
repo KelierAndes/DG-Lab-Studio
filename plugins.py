@@ -901,6 +901,55 @@ class PluginManager:
         if hasattr(settings, "save"):
             settings.save()
 
+    def apply_module_default_profiles(self, module_id: str) -> list[str]:
+        """模块卡片「快捷配置」：把模块自带的默认配置套用为当前配置。
+
+        默认配置可能在安装后被删掉：这里绕过「每版本只注入一次」的标记，
+        缺哪份补哪份，再把当前配置切过去（flow 文件名以「默认」开头的优先，
+        否则取排序第一份；按键映射同理）。返回给日志的说明行。
+        """
+        flows, binds = self._module_profile_files(module_id)
+        if not flows and not binds:
+            return [f"模块 {module_id} 没有自带默认配置文件"]
+        notes: list[str] = []
+        if flows:
+            flow_dir = event_flow.profiles_dir(self._config_dir())
+            active, known = event_flow.load_profiles(flow_dir)
+            restored = [n for n, _ in flows if n not in known]
+            for name, graphs in flows:
+                known.setdefault(name, graphs)
+            target = next((n for n, _ in flows if n.startswith("默认")),
+                          flows[0][0])
+            event_flow.save_profiles(target, known, flow_dir)
+            host = getattr(self.engine, "flow", None)
+            runtime = getattr(host, "runtime", None)
+            switched = False
+            if runtime is not None and getattr(runtime, "flow_dir", "") == flow_dir:
+                for name, graphs in flows:
+                    runtime.profiles[name] = graphs
+                if host is not None:
+                    switched = host.switch_profile(target)
+            note = f"模块 {module_id} 的事件流已套用默认配置「{target}」"
+            if restored:
+                note += f"（补回缺失的 {'、'.join(restored)}）"
+            if not switched:
+                note += "（重启后生效）"
+            notes.append(note)
+        if binds:
+            bind_dir = binding_store.bindings_dir(self._config_dir())
+            bind_active, bind_known = binding_store.load_binding_profiles(bind_dir)
+            restored = [n for n, _ in binds if n not in bind_known]
+            for name, rows in binds:
+                bind_known.setdefault(name, rows)
+            bind_target = next((n for n, _ in binds if n.startswith("默认")),
+                               binds[0][0])
+            binding_store.save_binding_profiles(bind_target, bind_known, bind_dir)
+            note = f"模块 {module_id} 的按键映射已套用默认配置「{bind_target}」"
+            if restored:
+                note += f"（补回缺失的 {'、'.join(restored)}）"
+            notes.append(note)
+        return notes
+
     def _unregister_actions(self, module_id: str) -> None:
         self._button_actions = {key: action for key, action
                                 in self._button_actions.items()

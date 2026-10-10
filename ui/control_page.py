@@ -458,6 +458,14 @@ class ControlPage(XamlClass, Page):
         active, profiles = engine.binding_profiles()
         return profiles.setdefault(active, {})
 
+    def _write_binding(self, bit, value: str) -> None:
+        """按键绑定落盘：binding_profiles() 每次都从配置文件夹现读，
+        返回的是临时字典，改完必须整包存回，否则写进去的绑定就丢了。"""
+        engine = self.shell.engine
+        active, profiles = engine.binding_profiles()
+        profiles.setdefault(active, {})[str(bit)] = str(value)
+        engine.save_binding_profiles(active, profiles)
+
     def _profile_selector(self, view: CardView) -> object:
         engine = self.shell.engine
         active, profiles = engine.binding_profiles()
@@ -942,8 +950,7 @@ class ControlPage(XamlClass, Page):
         def _changed(sender, args):
             if self._updating:
                 return
-            cfg = self._active_bindings()
-            cfg[str(bit)] = "osc:" + (box.Text or "").strip()
+            self._write_binding(bit, "osc:" + (box.Text or "").strip())
 
         box.TextChanged += _changed
         view.binding_inputs[bit] = box
@@ -964,7 +971,7 @@ class ControlPage(XamlClass, Page):
                 return
             args.Handled = True
             label = keyboard_keys.key_name(vk)
-            self._active_bindings()[str(bit)] = "key:" + label
+            self._write_binding(bit, "key:" + label)
             self._updating = True
             try:
                 box.Text = label
@@ -1004,7 +1011,7 @@ class ControlPage(XamlClass, Page):
         if key == "osc":
             current = str(bindings.get(str(bit), ""))
             address = current[4:] if current.startswith("osc:") else ""
-            bindings[str(bit)] = "osc:" + address
+            self._write_binding(bit, "osc:" + address)
             if box is not None:
                 self._updating = True
                 try:
@@ -1021,7 +1028,7 @@ class ControlPage(XamlClass, Page):
         if key == "key":
             current = str(bindings.get(str(bit), ""))
             name = current[4:] if current.startswith("key:") else ""
-            bindings[str(bit)] = "key:" + name
+            self._write_binding(bit, "key:" + name)
             if keybox is not None:
                 self._updating = True
                 try:
@@ -1035,7 +1042,7 @@ class ControlPage(XamlClass, Page):
                 label.Text = self._binding_label_text("key:" + name)
                 label.Foreground = theme.solid(self._BV_TEXT)
             return
-        bindings[str(bit)] = key
+        self._write_binding(bit, key)
         if box is not None:
             box.Visibility = Visibility.Collapsed
         if keybox is not None:

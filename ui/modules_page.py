@@ -233,6 +233,8 @@ class ModulesPage(XamlClass, Page):
                 buttons.Children.Append(W.text_button("启动", symbol="Play",
                                                       accent=True,
                                                       on_click=lambda s, e, mid=module_id: self._install(mid)))
+            buttons.Children.Append(W.text_button("快捷配置", symbol="Magic",
+                                                  on_click=lambda s, e, mid=module_id: self._apply_defaults(mid)))
             buttons.Children.Append(W.text_button("卸载", symbol="Remove",
                                                   on_click=lambda s, e, mid=module_id: self._uninstall(mid)))
 
@@ -1070,6 +1072,20 @@ class ModulesPage(XamlClass, Page):
         self._run_module_action(
             self.shell.engine.modules.uninstall(module_id),
             f"模块已卸载: {module_id}")
+
+    def _apply_defaults(self, module_id: str) -> None:
+        """快捷配置：把模块自带的默认事件流 / 按键映射套用为当前配置。"""
+        try:
+            notes = self.shell.engine.modules.apply_module_default_profiles(
+                module_id)
+        except Exception as exc:
+            import traceback
+            self.shell.logs.append(
+                f"模块 {module_id} 快捷配置失败:\n{traceback.format_exc()}")
+            return
+        for line in notes:
+            self.shell.logs.append(line)
+        self.rebuild()
 
     def _game_mod_row(self, module_id: str) -> object:
         engine = self.shell.engine
