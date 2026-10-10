@@ -14,7 +14,7 @@ import module_store
 from module_store import (ModuleStore, _embedded_python_dir,
                           deps_abi_ok, parse_requirements_text,
                           requirement_name, requirement_satisfied, version_key,
-                          wheel_abi_ok, pip_install)
+                          stale_wheels, wheel_abi_ok, pip_install)
 from plugins import PluginManager, _CLEANUP_MARKER
 from types import SimpleNamespace
 
@@ -98,7 +98,11 @@ def _make_sub_repo_zip(path: str, repo: str, module_id: str,
                         requirements)
 
 
-def _market_yaml(repo: str, module_id: str, version: str) -> bytes:
+def _market_yaml(repo: str, module_id: str, version: str,
+                 extra_declared: tuple[str, ...] = ()) -> bytes:
+    listed = ["README.md", f"modules/{module_id}/plugin.py"]
+    listed += [f"modules/{module_id}/{rel}" for rel in extra_declared]
+    files = ", ".join(listed)
     return (
         "schema: 1\n"
         "modules:\n"
@@ -112,7 +116,7 @@ def _market_yaml(repo: str, module_id: str, version: str) -> bytes:
         '    description: "demo"\n'
         "    default_enabled: false\n"
         "    requirements: []\n"
-        f"    files: [README.md, modules/{module_id}/plugin.py]\n"
+        f"    files: [{files}]\n"
     ).encode("utf-8")
 
 
@@ -301,6 +305,21 @@ class DepsAbiTests(unittest.TestCase):
         foreign = "cp312" if self.RUNNING != "cp312" else "cp311"
         self.assertFalse(wheel_abi_ok(
             f"numpy-2.5.3-{foreign}-{foreign}-win_amd64.whl"))
+
+    def test_stale_wheels_lists_only_mismatched(self):
+        tmp = tempfile.mkdtemp(prefix="dgstudio_stale_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for name in (f"numpy-2.5.3-{self.RUNNING}-{self.RUNNING}-win_amd64.whl",
+                     "six-1.17.0-py2.py3-none-any.whl",
+                     "opencv_python_headless-5.0.0.93-cp37-abi3-win_amd64.whl",
+                     "pyyaml-6.0.3-cp312-cp312-win_amd64.whl",
+                     "notes.txt"):
+            with open(os.path.join(tmp, name), "wb") as f:
+                f.write(b"")
+        expected = ([] if self.RUNNING == "cp312"
+                    else ["pyyaml-6.0.3-cp312-cp312-win_amd64.whl"])
+        self.assertEqual(stale_wheels(tmp), expected)
+        self.assertEqual(stale_wheels(os.path.join(tmp, "missing")), [])
 
     def test_frozen_ensure_quarantines_stale_abi_deps(self):
         base = tempfile.mkdtemp(prefix="dgstudio_embedpy_")
@@ -539,11 +558,12 @@ class DownloadTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
     def _fake_market(self, module_id: str, version: str,
-                     *, zip_ok: bool = True, requirements: str = "") -> None:
+                     *, zip_ok: bool = True, requirements: str = "",
+                     extra_declared: tuple[str, ...] = ()) -> None:
         repo = f"dgstudio-modules-{module_id}"
         market_path = os.path.join(self.tmp, "market.yaml")
         with open(market_path, "wb") as f:
-            f.write(_market_yaml(repo, module_id, version))
+            f.write(_market_yaml(repo, module_id, version, extra_declared))
         if zip_ok:
             zip_path = os.path.join(self.tmp, f"{repo}.zip")
             _make_sub_repo_zip(zip_path, repo, module_id, version, requirements)
@@ -554,6 +574,7 @@ class DownloadTests(unittest.TestCase):
         files_dir = os.path.join(self.tmp, "files")
         mod_files = os.path.join(files_dir, "modules", module_id)
         os.makedirs(mod_files, exist_ok=True)
+        self.repo_files = files_dir
         with open(os.path.join(mod_files, "plugin.py"), "w",
                   encoding="utf-8") as f:
             f.write('META = {"id": "%s", "version": "%s"}\n'
@@ -561,6 +582,11 @@ class DownloadTests(unittest.TestCase):
         with open(os.path.join(files_dir, "README.md"), "w",
                   encoding="utf-8") as f:
             f.write("# demo\n")
+        for rel in extra_declared:
+            target = os.path.join(mod_files, *rel.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as f:
+                f.write("payload\n")
 
         unittest.mock.patch.object(type(self.store), "_market_urls",
                                    return_value=[_file_url(market_path)]
@@ -590,6 +616,25 @@ class DownloadTests(unittest.TestCase):
         self.store.fetch_market()
         dest = self.store.download("sample")
         self.assertTrue(os.path.isfile(os.path.join(dest, "plugin.py")))
+
+    def test_download_refetches_files_missing_from_zip(self):
+        """仓库快照少了清单声明的文件时逐个补取，bin/ 里的 dll 不能静默丢失。"""
+        self._fake_market("sample", "1.0.0", extra_declared=("bin/payload.dll",))
+        self.store.fetch_market()
+        dest = self.store.download("sample")
+        self.assertTrue(os.path.isfile(os.path.join(dest, "plugin.py")))
+        self.assertTrue(os.path.isfile(os.path.join(dest, "bin", "payload.dll")))
+
+    def test_download_keeps_going_when_a_file_is_unreachable(self):
+        """仓库里也取不到的文件只报告警，不该把整个模块的安装挡掉。"""
+        self._fake_market("sample", "1.0.0", extra_declared=("bin/gone.dll",))
+        os.remove(os.path.join(self.repo_files, "modules", "sample", "bin",
+                               "gone.dll"))
+        self.store.fetch_market()
+        dest = self.store.download("sample")
+        self.assertTrue(os.path.isfile(os.path.join(dest, "plugin.py")))
+        self.assertFalse(os.path.exists(os.path.join(dest, "bin", "gone.dll")))
+        self.assertTrue(any("取不到" in msg for msg in self.engine._logs))
 
     def test_download_unknown_module_raises(self):
         self._fake_market("sample", "1.0.0")
@@ -836,6 +881,44 @@ class BundledWheelsTests(unittest.TestCase):
             self.manager.store._merge_wheel(wheel, target)
         self.assertFalse(os.path.exists(os.path.join(base, "evil.txt")))
         self.assertEqual(os.listdir(target), [])
+
+    def test_one_stale_wheel_does_not_void_the_rest(self):
+        """自带 wheel 里有一个 ABI 不符，其余可用 wheel 仍要装进 _deps。
+
+        内置 Python 一升级（cp312→cp314）时，整目录作废会让已经适配的 wheel
+        一起不用，模块只能联网安装——网络不通就是「依赖安装失败」。
+        """
+        base = tempfile.mkdtemp(prefix="dgstudio_whlmix_")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        _stage_runtime(base)
+        wheels = os.path.join(self.module_dir, "wheels")
+        os.makedirs(wheels)
+        self._make_wheel(
+            os.path.join(wheels, "dgstudio_fake_dep-1.0-py3-none-any.whl"),
+            "dgstudio-fake-dep", "1.0")
+        self._make_wheel(
+            os.path.join(wheels,
+                         "dgstudio_other-1.0-cp99-cp99-win_amd64.whl"),
+            "dgstudio-other", "1.0")
+
+        def _fail_run(*_args, **_kwargs):
+            raise AssertionError("ABI 相符的 wheel 已覆盖需求，pip 不应被调用")
+
+        logs: list[str] = []
+        with unittest.mock.patch.object(sys, "frozen", True, create=True), \
+                _frozen_exe(base), \
+                unittest.mock.patch.object(module_store.subprocess, "run",
+                                           _fail_run):
+            ok, still, _out = self.manager.store.ensure_dependencies(
+                "sample", log=logs.append)
+        self.assertTrue(ok)
+        self.assertEqual(still, [])
+        deps = os.path.join(self.module_dir, "_deps")
+        self.assertTrue(os.path.isfile(
+            os.path.join(deps, "dgstudio_fake_dep", "__init__.py")))
+        self.assertFalse(os.path.isdir(os.path.join(deps, "dgstudio_other")))
+        self.assertTrue(any("ABI 不符" in line and "cp99" in line
+                            for line in logs))
 
 
 if __name__ == "__main__":

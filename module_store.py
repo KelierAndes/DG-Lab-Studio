@@ -137,6 +137,18 @@ def wheel_abi_ok(filename: str) -> bool:
     return py_tag == running and abi_tag == running
 
 
+def stale_wheels(wheels_dir: str) -> list[str]:
+    """目录里与当前解释器 ABI 不符的 wheel 文件名（纯 Python / abi3 不计入）。"""
+    if not wheels_dir or not os.path.isdir(wheels_dir):
+        return []
+    try:
+        names = sorted(os.listdir(wheels_dir))
+    except OSError:
+        return []
+    return [name for name in names if name.endswith(".whl")
+            and not wheel_abi_ok(name)]
+
+
 def _embedded_python_dir() -> str:
     if not getattr(sys, "frozen", False):
         return ""
@@ -427,6 +439,8 @@ class ModuleStore:
             got_zip = False
         if not got_zip:
             self._fetch_files(entry, tmp, opener)
+        else:
+            self._refetch_missing(entry, tmp, opener)
         if not os.path.isfile(os.path.join(tmp, "plugin.py")):
             raise RuntimeError(f"模块 {module_id} 下载不完整（缺 plugin.py）")
         old = dest + ".old"
@@ -474,28 +488,63 @@ class ModuleStore:
         return True
 
     def _fetch_files(self, entry: dict, tmp: str, opener=None) -> None:
-        path_prefix = f"{entry['path']}/" if entry.get("path") else ""
-        files = [str(f) for f in (entry.get("files") or [])
-                 if not str(f).startswith("_deps/")]
-        for name in files:
-            if path_prefix:
-                if not name.startswith(path_prefix):
+        failed = [rel for name, rel in self._module_files(entry)
+                  if not self._fetch_one(entry, name, os.path.join(
+                      tmp, *rel.split("/")), opener)]
+        if failed:
+            raise RuntimeError("文件下载失败: " + "、".join(failed))
+
+    @staticmethod
+    def _module_files(entry: dict) -> list[tuple[str, str]]:
+        """市场清单里属于本模块目录的文件：(仓库内路径, 模块内相对路径)。"""
+        prefix = f"{entry['path']}/" if entry.get("path") else ""
+        pairs: list[tuple[str, str]] = []
+        for item in entry.get("files") or []:
+            name = str(item)
+            if name.startswith("_deps/") or "__pycache__" in name:
+                continue
+            if prefix:
+                if not name.startswith(prefix):
                     continue
-                rel_in_module = name[len(path_prefix):]
+                pairs.append((name, name[len(prefix):]))
             else:
-                rel_in_module = name
-            for url in self._file_urls(entry, name):
-                try:
-                    data = _http_get(url, timeout=_HTTP_TIMEOUT, opener=opener)
-                except Exception:
-                    continue
-                target = os.path.join(tmp, *rel_in_module.split("/"))
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with open(target, "wb") as f:
-                    f.write(data)
-                break
-            else:
-                raise RuntimeError(f"文件下载失败: {name}")
+                pairs.append((name, name))
+        return pairs
+
+    def _fetch_one(self, entry: dict, repo_path: str, target: str,
+                   opener=None) -> bool:
+        for url in self._file_urls(entry, repo_path):
+            try:
+                data = _http_get(url, timeout=_HTTP_TIMEOUT, opener=opener)
+            except Exception:
+                continue
+            parent = os.path.dirname(target)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(target, "wb") as f:
+                f.write(data)
+            return True
+        return False
+
+    def _refetch_missing(self, entry: dict, tmp: str, opener=None) -> None:
+        """整仓 zip 里缺清单声明的文件时逐个补取。
+
+        分支快照与清单生成之间有时间差（也挡不住个别平台不落子目录），少了
+        bin/ 里的 dll 这类文件不会报错，只会在运行时降级，所以按清单核对一次。
+        """
+        missing = [(name, rel) for name, rel in self._module_files(entry)
+                   if not os.path.isfile(os.path.join(tmp, *rel.split("/")))]
+        if not missing:
+            return
+        self._log(f"模块 {entry['id']} 的仓库快照缺 "
+                  f"{len(missing)} 个清单文件，逐个补取："
+                  + "、".join(rel for _name, rel in missing))
+        failed = [rel for name, rel in missing
+                  if not self._fetch_one(entry, name, os.path.join(
+                      tmp, *rel.split("/")), opener)]
+        if failed:
+            self._log(f"模块 {entry['id']} 仍有文件取不到（"
+                      + "、".join(failed) + "），该模块功能可能不完整")
 
 
     def deps_dir(self, module_id: str) -> str:
@@ -552,22 +601,24 @@ class ModuleStore:
 
     def _merge_bundled_wheels(self, module_id: str, deps: str,
                               *, log=None) -> None:
+        """把随包 wheel 逐个解开到 _deps：只跳过 ABI 不符的那几个。
+
+        模块自带 wheel 是「无网络也能装依赖」的唯一保障。整目录作废会让已经
+        适配的 wheel（abi3 / 纯 Python 那些）也一起不用，模块只能联网安装；
+        内置 Python 一升级就把所有已装模块打成「装不上」。
+        """
         wheels = self.wheels_dir(module_id)
         if not wheels:
             return
-        names = [name for name in sorted(os.listdir(wheels))
-                 if name.endswith(".whl")]
-        stale = [name for name in names if not wheel_abi_ok(name)]
-        if stale:
-            # 自带 wheel 与当前内置 Python ABI 不符时整体不用：只合并一部分会让
-            # 「已安装」判定提前成立，其依赖（如 opencv 的 numpy）永远不会装
-            if log is not None:
-                log(f"[deps] 自带 wheel 中有 {len(stale)} 个与当前内置 Python"
-                    f"（{_running_abi()}）ABI 不符，本次忽略全部自带 wheel、"
-                    "改从网络安装（涉及：" + "、".join(stale) + "）")
-            return
+        skipped = stale_wheels(wheels)
+        if skipped and log is not None:
+            log(f"[deps] 自带 wheel 中有 {len(skipped)} 个与当前内置 Python"
+                f"（{_running_abi()}）ABI 不符，本次跳过（涉及："
+                + "、".join(skipped) + "）；模块若导入失败请更新模块版本")
         merged = 0
-        for name in names:
+        for name in sorted(os.listdir(wheels)):
+            if not name.endswith(".whl") or not wheel_abi_ok(name):
+                continue
             try:
                 merged += bool(self._merge_wheel(os.path.join(wheels, name),
                                                  deps))
