@@ -25,7 +25,9 @@ _HTTP_TIMEOUT = 10.0
 # 这里的 timeout 是「单次 socket 读」的上限，不是整个传输的时限。
 _FILE_TIMEOUT = 120.0
 _ZIP_TIMEOUT = 60.0
-_ZIP_RETRIES = 3
+# 整包快照失败的常见原因是链路本身撑不住这个体积，重连第三次也一样失败，却要多
+# 等一两分钟才回退逐文件（实测 vision_link 三次重试占了 5.5 分钟里的近 3 分钟）。
+_ZIP_RETRIES = 2
 
 MIRROR_PRESETS = ("https://ghfast.top/", "https://gh-proxy.com/",
                   "https://ghproxy.net/")
