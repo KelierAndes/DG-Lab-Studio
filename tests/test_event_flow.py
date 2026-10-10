@@ -668,6 +668,7 @@ class _FakeModule:
 
     def __init__(self):
         self.renamed: list[tuple[str, str]] = []
+        self.bridge = None
 
     def link_params(self):
         return [{"name": "osc_strength", "label": "OSC 强度", "dir": "out"},
@@ -688,6 +689,7 @@ class _FakeModules:
         self.cfgs: dict[str, _FakeCfg] = {}
         self.metas = [{"id": "osc_bridge", "name": "OSC 桥接模块"}]
         self.inst = _FakeModule()
+        self._instances = {"osc_bridge": self.inst}
         self.specs: list[dict] = []
         self.enabled: set[str] | None = None
 
@@ -704,7 +706,10 @@ class _FakeModules:
         return self.inst if module_id == "osc_bridge" else None
 
     def _mapping_engine(self, module_id: str):
-        return None
+        """与 plugins.PluginManager._mapping_engine 同一条查找路径。"""
+        inst = self.instance(module_id)
+        runtime = getattr(inst, "bridge", None) or getattr(inst, "server", None)
+        return getattr(runtime, "engine", None) if runtime is not None else None
 
     def temp_specs_for(self, module_id: str):
         return [dict(spec) for spec in self.specs]
@@ -853,6 +858,24 @@ class FlowHostTests(unittest.TestCase):
                                      42.0)
         self.host.runtime.tick(now=0.0)
         self.assertEqual(node.live, [42.0])
+
+    def test_module_signals_feed_values_and_reserved_names(self):
+        """模块读数走 `bridge.engine.signals` 进事件流：这条挂接名不能改。
+
+        osc 这类模块把收到的外部值放在自己的运行时里，核心按
+        `_mapping_engine(mid).signals` 取现值；接口一旦对不上，
+        module_signals 会静默返回空（被 except 兜住），卡片只会显示没数据。
+        """
+        engine = SimpleNamespace(signals={"osc_hp": 12.0}, temps={},
+                                 pump=lambda: None)
+        self.engine.modules.inst.bridge = SimpleNamespace(engine=engine)
+        self.host.refresh(force=True)
+        self.assertEqual(self.host.module_signals(),
+                         {"osc_bridge": {"osc_hp": 12.0}})
+        self.assertEqual(self.host.runtime.value_space().get("osc_hp"), 12.0)
+        self.assertIn("osc_hp", self.host.runtime.system_var_names())
+        engine.signals["osc_hp"] = 7.0
+        self.assertEqual(self.host.runtime.value_space().get("osc_hp"), 7.0)
 
     def test_declared_params_inject_into_var_table(self):
         """模块登记即注入变量表：没有实时值也要出现，并带可读 / 可写方向。"""
