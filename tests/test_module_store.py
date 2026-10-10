@@ -671,6 +671,8 @@ class DownloadTests(unittest.TestCase):
         seen: list[float] = []
 
         class Resp:
+            headers = {}
+
             def __enter__(self):
                 return self
 
@@ -836,6 +838,40 @@ class ModuleDeleteTests(unittest.TestCase):
             f.write("# leftover\n")
         self.manager.discover()
         self.assertFalse(os.path.exists(junk))
+
+
+class StreamToIntegrityTests(unittest.TestCase):
+    """流式落盘必须按 Content-Length 校长度：半截 wheel 装依赖时才炸。"""
+
+    class _Resp:
+        def __init__(self, body: bytes, length: int | None):
+            self._body = body
+            self._pos = 0
+            self.headers = ({"Content-Length": str(length)}
+                            if length is not None else {})
+
+        def read(self, size=-1):
+            chunk = self._body[self._pos:self._pos + size]
+            self._pos += len(chunk)
+            return chunk
+
+    def _run(self, body: bytes, length: int | None) -> str:
+        tmp = tempfile.mkdtemp(prefix="dgstudio_stream_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        dest = os.path.join(tmp, "part.whl")
+        module_store._stream_to(self._Resp(body, length), dest)
+        with open(dest, "rb") as f:
+            return f.read().decode()
+
+    def test_truncated_body_raises(self):
+        with self.assertRaises(OSError):
+            self._run(b"half", 10)
+
+    def test_exact_body_writes_through(self):
+        self.assertEqual(self._run(b"whole", 5), "whole")
+
+    def test_unknown_length_passes_through(self):
+        self.assertEqual(self._run(b"streamed", None), "streamed")
 
 
 class BundledWheelsTests(unittest.TestCase):

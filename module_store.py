@@ -39,6 +39,25 @@ def _open_url(url: str, *, timeout: float, opener=None):
     return open_url(request, timeout=timeout)
 
 
+def _stream_to(resp, dest: str) -> None:
+    """流式落盘并按 Content-Length 校长度：半截 wheel 解开就是 BadZipFile。
+
+    代理 / 加速前缀把响应提前掐断时不一定抛 IncompleteRead，实测 12.7 MB 的
+    numpy wheel 会只剩 2.3 MB 而「下载成功」，装依赖时才炸。
+    """
+    expected = None
+    try:
+        header = resp.headers.get("Content-Length") if resp.headers else None
+        expected = int(header) if header else None
+    except (TypeError, ValueError):
+        expected = None
+    with open(dest, "wb") as out:
+        shutil.copyfileobj(resp, out, 1 << 20)
+    got = os.path.getsize(dest)
+    if expected is not None and got != expected:
+        raise OSError(f"下载不完整：{got}/{expected} 字节")
+
+
 def _http_get(url: str, *, timeout: float = _HTTP_TIMEOUT, opener=None) -> bytes:
     with _open_url(url, timeout=timeout, opener=opener) as resp:
         return resp.read()
@@ -478,11 +497,12 @@ class ModuleStore:
     def _repo_coords(entry: dict) -> dict:
         return {"repo": entry["repo"], "branch": entry.get("branch") or "main"}
 
-    def _fetch_zip(self, entry: dict, opener=None) -> bytes:
-        """整仓快照落到临时文件再读：几十 MB 的 wheel 仓库直接 read() 成常见断流。
+    def _fetch_zip(self, entry: dict, opener=None) -> str:
+        """整仓快照流式落到临时文件，返回路径（调用方负责删）。
 
-        codeload 在大仓库上会 IncompleteRead，所以按次重试；每次都是新连接，
-        比把半截数据留在内存里更可能读完。全部失败交给上层回退逐文件取。
+        带上 wheel 的仓库快照有 100 MB 量级：一次性 read() 成常见断流，代理提前
+        掐断连接时也不一定抛错，所以落到临时文件 + 按 Content-Length 校长度 +
+        按次重连（每次都是新连接，比把半截数据留在内存里更可能读完）。
         """
         url = self._zip_url(entry)
         errors: list[str] = []
@@ -490,14 +510,11 @@ class ModuleStore:
             handle, path = tempfile.mkstemp(suffix=".zip", prefix="dgstudio_")
             os.close(handle)
             try:
-                with _open_url(url, timeout=_ZIP_TIMEOUT, opener=opener) as resp, \
-                        open(path, "wb") as out:
-                    shutil.copyfileobj(resp, out, 1 << 20)
-                with open(path, "rb") as src:
-                    return src.read()
+                with _open_url(url, timeout=_ZIP_TIMEOUT, opener=opener) as resp:
+                    _stream_to(resp, path)
+                return path
             except Exception as exc:
-                errors.append(f"{type(exc).__name__}: {exc}")
-            finally:
+                errors.append(f"{_host(url)} {type(exc).__name__}: {exc}")
                 try:
                     os.remove(path)
                 except OSError:
@@ -506,14 +523,25 @@ class ModuleStore:
 
     def _extract_from_zip(self, entry: dict, tmp: str, opener=None) -> bool:
         r = self._repo_coords(entry)
-        archive = zipfile.ZipFile(io.BytesIO(self._fetch_zip(entry, opener)))
-        with archive:
+        path = self._fetch_zip(entry, opener)
+        try:
+            self._unpack_zip(path, entry, r, tmp)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return True
+
+    @staticmethod
+    def _unpack_zip(path: str, entry: dict, r: dict, tmp: str) -> None:
+        with zipfile.ZipFile(path) as archive:
             prefix = f"{r['repo']}-{r['branch']}/" + (f"{entry['path']}/"
                                                      if entry.get("path") else "")
             names = [name for name in archive.namelist()
                      if name.startswith(prefix) and not name.endswith("/")]
             if not names:
-                return False
+                raise RuntimeError("仓库快照里没有本模块目录")
             for name in names:
                 rel = name[len(prefix):]
                 target = os.path.join(tmp, *rel.split("/"))
@@ -522,7 +550,6 @@ class ModuleStore:
                     os.makedirs(parent, exist_ok=True)
                 with archive.open(name) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
-        return True
 
     def _fetch_files(self, entry: dict, tmp: str, opener=None) -> None:
         failed = []
@@ -567,8 +594,7 @@ class ModuleStore:
                     parent = os.path.dirname(target)
                     if parent:
                         os.makedirs(parent, exist_ok=True)
-                    with open(target, "wb") as f:
-                        shutil.copyfileobj(resp, f, 1 << 20)
+                    _stream_to(resp, target)
                 return ""
             except Exception as exc:
                 last = f"{_host(url)} {type(exc).__name__}: {exc}"
