@@ -8,9 +8,11 @@ from win32more.Microsoft.UI.Xaml.Controls import Button, Page
 from win32more.winui3 import XamlClass
 
 from ui import live, theme, widgets as W
+from ui.deferred import Phased
 from ui.paths import xaml
 
 MAX_ROWS = 300
+ROWS_PER_STEP = 60
 
 class LogPage(XamlClass, Page):
     def __init__(self, shell):
@@ -21,6 +23,7 @@ class LogPage(XamlClass, Page):
         self._version_seen = -1
         self._last = 0.0
         self.LoadComponentFromFile(xaml("LogPage.xaml"), encoding="utf-8")
+        self._phase = Phased(shell)
         self.rebuild()
 
     def tick(self) -> None:
@@ -90,20 +93,33 @@ class LogPage(XamlClass, Page):
         self._last = time.monotonic()
         lines = self._visible()
         self._version_seen = self.shell.logs.version
-        self.CountText.Text = f"{len(lines)} 条显示 · 当前等级 {self._level}"
-
         host = self.LogHost
-        host.Children.Clear()
-        if not lines:
+        rows = list(enumerate(lines))
+        steps = [lambda: self._reset_rows(len(lines))]
+
+        def _add_empty():
             host.Children.Append(W.box(height=40,
                                        child=W.text("暂无日志", size=12,
                                                     color="text3", v="center"),
                                        h="stretch"))
-            return
-        for i, (ts, level, message) in enumerate(lines):
-            if i:
-                host.Children.Append(W.divider())
-            host.Children.Append(self._row(ts, level, message))
+
+        for start in range(0, len(rows), ROWS_PER_STEP):
+            chunk = rows[start:start + ROWS_PER_STEP]
+
+            def _add(chunk=chunk):
+                for gi, (ts, level, message) in chunk:
+                    if gi:
+                        host.Children.Append(W.divider())
+                    host.Children.Append(self._row(ts, level, message))
+
+            steps.append(_add)
+        if not rows:
+            steps.append(_add_empty)
+        self._phase.run(steps)
+
+    def _reset_rows(self, count: int) -> None:
+        self.CountText.Text = f"{count} 条显示 · 当前等级 {self._level}"
+        self.LogHost.Children.Clear()
 
     def _visible(self):
         return self.shell.logs.filtered(self._level, self._keyword, MAX_ROWS)

@@ -30,6 +30,7 @@ from dglab.state import family_of
 from dglab import keys as keyboard_keys
 from ui import charts
 from ui import live, theme, widgets as W
+from ui.deferred import Phased
 from ui.dialogs import confirm_dialog, prompt_text
 from ui.paths import xaml
 
@@ -83,6 +84,7 @@ class ControlPage(XamlClass, Page):
         self._last_value_render = 0.0
         self._glow_state: dict[int, tuple] = {}
         self.LoadComponentFromFile(xaml("ControlPage.xaml"), encoding="utf-8")
+        self._phase = Phased(shell)
         self.rebuild()
 
     def on_notify(self) -> None:
@@ -127,16 +129,21 @@ class ControlPage(XamlClass, Page):
         host.Children.Clear()
         self._cards.clear()
         self._glow_state.clear()
+        steps = []
         if not state.slots:
-            host.Children.Append(self._empty_note())
-            return
-        for sid in sorted(state.slots):
-            slot = state.slots[sid]
-            family = family_of(slot.type)
-            view = CardView(sid, family)
-            self._cards[sid] = view
-            builder = self._sensor_card if family == "BMTR" else self._output_card
-            host.Children.Append(builder(view, sid, slot))
+            steps.append(lambda: host.Children.Append(self._empty_note()))
+        else:
+            for sid in sorted(state.slots):
+                slot = state.slots[sid]
+                steps.append(lambda sid=sid, slot=slot: self._build_device_card(sid, slot))
+        self._phase.run(steps)
+
+    def _build_device_card(self, sid: str, slot) -> None:
+        family = family_of(slot.type)
+        view = CardView(sid, family)
+        self._cards[sid] = view
+        builder = self._sensor_card if family == "BMTR" else self._output_card
+        self.CardsHost.Children.Append(builder(view, sid, slot))
 
     def _empty_note(self):
         row = W.grid(W.star(1), W.auto())

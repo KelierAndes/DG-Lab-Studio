@@ -336,6 +336,9 @@ class MainWindow(XamlClass, Window):
     def _on_closed(self, sender, args) -> None:
         try:
             for page in self._pages.values():
+                phase = getattr(page, "_phase", None)
+                if phase is not None:
+                    phase.cancel()
                 flush = getattr(page, "flush_config", None)
                 if flush is not None:
                     try:

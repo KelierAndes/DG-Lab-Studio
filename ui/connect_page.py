@@ -14,6 +14,7 @@ from win32more.winui3 import XamlClass
 from dglab.ble import BleClient
 from dglab.state import family_of
 from ui import live, theme, widgets as W
+from ui.deferred import Phased
 from ui.paths import xaml
 
 _CHANNEL_SYMBOL = {"v4": "Link", "v3": "Remote", "ble": "CellPhone"}
@@ -32,6 +33,7 @@ class ConnectPage(XamlClass, Page):
         self._lan_ip_cache = None
         self._lan_ip_at = None
         self.LoadComponentFromFile(xaml("ConnectPage.xaml"), encoding="utf-8")
+        self._phase = Phased(shell)
         self.rebuild()
 
     def tick(self) -> None:
@@ -78,9 +80,11 @@ class ConnectPage(XamlClass, Page):
         host = self.CardsHost
         host.Children.Clear()
         self._cards.clear()
-        host.Children.Append(self._relay_card("v4"))
-        host.Children.Append(self._relay_card("v3"))
-        host.Children.Append(self._ble_card())
+        self._phase.run([
+            lambda: host.Children.Append(self._relay_card("v4")),
+            lambda: host.Children.Append(self._relay_card("v3")),
+            lambda: host.Children.Append(self._ble_card()),
+        ])
 
     def _relay_card(self, key: str) -> object:
         engine = self.shell.engine
@@ -299,6 +303,8 @@ class ConnectPage(XamlClass, Page):
         state = self.shell.state
         for key in ("v4", "v3"):
             refs = self._cards.get(key)
+            if refs is None:
+                continue
             if key != state.backend:
                 if refs.get("pairing_open"):
                     refs["pairing_open"] = False

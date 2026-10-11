@@ -19,6 +19,7 @@ from dglab.parsing import parse_name, parse_rect
 from dglab.params import output_specs
 from module_store import deps_abi_ok, requirement_satisfied, version_key
 from ui import theme, widgets as W
+from ui.deferred import Phased
 from ui.dialogs import confirm_dialog, pick_open_path
 from ui.paths import xaml
 from ui.region_pick import pick_crop, pick_region
@@ -80,6 +81,7 @@ class ModulesPage(XamlClass, Page):
         self._blocks: dict[str, object] = {}
         self._open_blocks: dict[str, bool] = {}
         self.LoadComponentFromFile(xaml("ModulesPage.xaml"), encoding="utf-8")
+        self._phase = Phased(shell)
         self.rebuild()
 
     def tick(self) -> None:
@@ -131,36 +133,38 @@ class ModulesPage(XamlClass, Page):
             ],
         )
         self._updating = True
-        try:
-            self._live_cells = []
-            content = W.stack(spacing=10, h="stretch")
-            installed = [meta for meta in self.shell.engine.modules.list_modules()
-                         if meta["id"] not in HIDDEN_MODULES]
-            if not installed:
-                content.Children.Append(self._hint_card(
-                    "模块目录为空",
-                    f"可从下方「在线模块」一键下载，或将模块文件夹放入 "
-                    f"{self.shell.engine.modules.base_dir} 后点「扫描模块目录」。"))
-            for meta in installed:
-                content.Children.Append(self._module_card(meta))
-            content.Children.Append(self._section_head(
-                "在线模块",
-                "清单来自 dgstudio-modules-market 仓库，点击「下载」取回模块文件，"
-                "下载完成后自动安装（不启用），点「启动」开始运行。"))
-            content.Children.Append(self._online_list())
-            content.Children.Append(self._hint_card(
-                "开发自己的模块",
-                "模块是 modules/<id>/plugin.py 中的一个 ModuleBase 子类，可获得强度参数、"
-                "波形、开火、急停、临时变量（ctx.set_temp/get_temp，META[\"temps\"] 声明"
-                "展示为模块维护行）等公开 API。接口说明与示例见 dgstudio-modules-market "
-                "仓库的开发文档，模块依赖由 META[\"dependencies\"] 声明、安装时自动补装。",
-                link_label="dgstudio-modules-market · 模块开发文档（EXTENSIONS.md）"))
-            self.ListHost.Content = content
-        finally:
-            self._updating = False
+        self._live_cells = []
+        content = W.stack(spacing=10, h="stretch")
+        self.ListHost.Content = content
+        installed = [meta for meta in self.shell.engine.modules.list_modules()
+                     if meta["id"] not in HIDDEN_MODULES]
+        steps = []
+        if not installed:
+            steps.append(lambda: content.Children.Append(self._hint_card(
+                "模块目录为空",
+                f"可从下方「在线模块」一键下载，或将模块文件夹放入 "
+                f"{self.shell.engine.modules.base_dir} 后点「扫描模块目录」。")))
+        for meta in installed:
+            steps.append(lambda meta=meta: content.Children.Append(self._module_card(meta)))
+        steps.append(lambda: content.Children.Append(self._section_head(
+            "在线模块",
+            "清单来自 dgstudio-modules-market 仓库，点击「下载」取回模块文件，"
+            "下载完成后自动安装（不启用），点「启动」开始运行。")))
+        steps.append(lambda: content.Children.Append(self._online_list()))
+        steps.append(lambda: content.Children.Append(self._hint_card(
+            "开发自己的模块",
+            "模块是 modules/<id>/plugin.py 中的一个 ModuleBase 子类，可获得强度参数、"
+            "波形、开火、急停、临时变量（ctx.set_temp/get_temp，META[\"temps\"] 声明"
+            "展示为模块维护行）等公开 API。接口说明与示例见 dgstudio-modules-market "
+            "仓库的开发文档，模块依赖由 META[\"dependencies\"] 声明、安装时自动补装。",
+            link_label="dgstudio-modules-market · 模块开发文档（EXTENSIONS.md）")))
+        self._phase.run(steps, finally_step=self._finish_rebuild)
         if not self._fetch_started:
             self._fetch_started = True
             self._fetch_online(force=False)
+
+    def _finish_rebuild(self) -> None:
+        self._updating = False
 
     def flush_config(self) -> None:
         pass

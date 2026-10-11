@@ -9,6 +9,7 @@ from win32more.winui3 import XamlClass
 
 from dglab.state import family_of
 from ui import live, nav, theme, widgets as W
+from ui.deferred import Phased
 from ui.paths import xaml
 
 class DashboardPage(XamlClass, Page):
@@ -16,6 +17,7 @@ class DashboardPage(XamlClass, Page):
         super().__init__()
         self.shell = shell
         self.LoadComponentFromFile(xaml("DashboardPage.xaml"), encoding="utf-8")
+        self._phase = Phased(shell)
         self._state_seen: tuple | None = None
         self._mod_sig: tuple = ()
         self._last = 0.0
@@ -74,17 +76,22 @@ class DashboardPage(XamlClass, Page):
                               on_click=lambda s, e: self._disconnect_all()),
             ],
         )
-        self._fill_stats()
-        self.InputChannelsHost.Content = self._input_channels_card()
-        self.OutputChannelsHost.Content = self._output_channels_card()
-
         host = self.DevicesHost
         host.Children.Clear()
         state = shell.state
+        steps = [
+            self._fill_stats,
+            self._fill_input_channels,
+            self._fill_output_channels,
+        ]
         for sid in sorted(state.slots):
-            host.Children.Append(self._device_card(sid, state.slots[sid]))
+            slot = state.slots[sid]
+            steps.append(lambda sid=sid, slot=slot:
+                         host.Children.Append(self._device_card(sid, slot)))
         if not state.slots:
-            host.Children.Append(self._empty_note())
+            steps.append(lambda: host.Children.Append(self._empty_note()))
+        self._phase.run(steps)
+
     def _fill_stats(self) -> None:
         host = self.StatsHost
         host.Children.Clear()
@@ -92,6 +99,12 @@ class DashboardPage(XamlClass, Page):
         for i, stat in enumerate(live.stats(self.shell.engine, self.shell.logs)):
             host.ColumnDefinitions.Append(W.column(stars=1))
             host.Children.Append(W.put(W.card(self._stat_body(stat)), i))
+
+    def _fill_input_channels(self) -> None:
+        self.InputChannelsHost.Content = self._input_channels_card()
+
+    def _fill_output_channels(self) -> None:
+        self.OutputChannelsHost.Content = self._output_channels_card()
 
     def _stat_body(self, stat: dict):
         g = W.grid(W.fixed(46), W.star(1), W.auto())

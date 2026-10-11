@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import faulthandler
 import json
 import os
@@ -420,6 +421,8 @@ def _run_selftest() -> None:
 
         time.sleep(2.5)
 
+        probe_rounds = [0]
+
         def probe_and_close():
             try:
                 win = App.window
@@ -453,6 +456,27 @@ def _run_selftest() -> None:
                     except Exception as exc:
                         REPORT[f"tick_{tag}_ok"] = False
                         REPORT["tick_error"] = f"{tag}: {exc!r}"
+
+                # 分帧渲染：卡片跨多个 UI 拍上屏，等所有页面构建收尾再断言卡片内部。
+                # ui_queue 会在同一拍里被抽干，重排队不产生等待，必须用 asyncio 跨拍等。
+                if any(getattr(p, "_phase", None) is not None and p._phase.busy
+                       for p in win._pages.values()):
+                    if probe_rounds[0] < 100:
+                        probe_rounds[0] += 1
+
+                        async def _wait_phases():
+                            for _ in range(80):
+                                if not any(getattr(p, "_phase", None) is not None
+                                           and p._phase.busy
+                                           for p in win._pages.values()):
+                                    break
+                                await asyncio.sleep(0.02)
+                            win.ui_queue.put(probe_and_close)
+
+                        from win32more import asyncui
+                        asyncui.create_task(_wait_phases())
+                        return
+                    REPORT["phase_wait_ok"] = False
 
                 REPORT["modules_autofetch_ok"] = (
                     win._page("modules")._fetch_started)

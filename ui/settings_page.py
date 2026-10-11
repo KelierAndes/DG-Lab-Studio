@@ -5,6 +5,7 @@ from win32more.Microsoft.UI.Xaml.Controls import Page
 from win32more.winui3 import XamlClass
 
 from ui import live, widgets as W
+from ui.deferred import Phased
 from ui.paths import xaml
 from module_store import MIRROR_PRESETS, PROXY_PRESETS
 from dglab.version import APP_VERSION
@@ -24,36 +25,40 @@ class SettingsPage(XamlClass, Page):
         self.shell = shell
         self._updating = False
         self.LoadComponentFromFile(xaml("SettingsPage.xaml"), encoding="utf-8")
+        self._phase = Phased(shell)
         self.rebuild()
 
     def rebuild(self) -> None:
         self._updating = True
-        try:
-            W.page_head(
-                self.HeadHost,
-                {"title": "设置",
-                 "subtitle": "外观、连接、配置文件、模块市场与日志参数；"
-                             "OSC 设置在「联动」页配置",
-                 "breadcrumb": ["设置"]},
-                actions=[
-                    W.text_button("保存到文件", symbol="Save", accent=True,
-                                  on_click=lambda s, e: self._save_all()),
-                    W.text_button("恢复默认提示", symbol="Refresh",
-                                  on_click=lambda s, e: self.shell.logs.append(
-                                      "恢复默认：请删除 config.json 与 config/ 目录后重启应用")),
+        W.page_head(
+            self.HeadHost,
+            {"title": "设置",
+             "subtitle": "外观、连接、配置文件、模块市场与日志参数；"
+                         "OSC 设置在「联动」页配置",
+             "breadcrumb": ["设置"]},
+            actions=[
+                W.text_button("保存到文件", symbol="Save", accent=True,
+                              on_click=lambda s, e: self._save_all()),
+                W.text_button("恢复默认提示", symbol="Refresh",
+                              on_click=lambda s, e: self.shell.logs.append(
+                                  "恢复默认：请删除 config.json 与 config/ 目录后重启应用")),
                 ],
-            )
+        )
+        host = self.GroupsHost
+        host.Children.Clear()
+        groups = [
+            self._group_appearance,
+            self._group_connection,
+            self._group_config_files,
+            self._group_market,
+            self._group_log,
+            self._group_about,
+        ]
+        steps = [lambda build=build: host.Children.Append(build()) for build in groups]
+        self._phase.run(steps, finally_step=self._finish_rebuild)
 
-            host = self.GroupsHost
-            host.Children.Clear()
-            host.Children.Append(self._group_appearance())
-            host.Children.Append(self._group_connection())
-            host.Children.Append(self._group_config_files())
-            host.Children.Append(self._group_market())
-            host.Children.Append(self._group_log())
-            host.Children.Append(self._group_about())
-        finally:
-            self._updating = False
+    def _finish_rebuild(self) -> None:
+        self._updating = False
 
     def _wrap(self, title: str, subtitle: str, rows: list) -> object:
         body = W.stack(spacing=0)
