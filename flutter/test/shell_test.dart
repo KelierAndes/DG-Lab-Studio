@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:dgstudio/app/shell.dart';
@@ -195,6 +196,9 @@ void main() {
     shell.nav.go(AppPage.settings);
     await tester.pump(const Duration(milliseconds: 200));
 
+    // 设置页现在多了「软件更新」一张卡，保存按钮在更下面，先滚到可见处。
+    await tester.ensureVisible(find.byKey(const ValueKey('settings-save')));
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('settings-save')));
     await tester.pump(const Duration(milliseconds: 200));
     expect(
@@ -203,6 +207,8 @@ void main() {
       reason: '保存到文件 按钮没把请求发出去',
     );
 
+    await tester.ensureVisible(find.byKey(const ValueKey('settings-export')));
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('settings-export')));
     await tester.pump(const Duration(milliseconds: 300));
     expect(
@@ -284,6 +290,60 @@ void main() {
       ),
     );
     expect(label.style!.color, Colors.white, reason: '白字也不跟着主题变');
+  });
+
+  // 软件更新：只在检测到更新时才露出「立即更新」，点下去按「下载 → 安装」两步走。
+  testWidgets('软件更新卡：检查后按版本决定是否给「立即更新」', (tester) async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel('window_manager'),
+      (call) async => null,
+    );
+    final transport = MockEngineTransport(heartbeat: false);
+    final engine = StudioEngine(transport);
+    addTearDown(engine.dispose);
+    final shell = await bootShell<AppShellState>(
+      tester,
+      AppShell(engine: engine),
+    );
+    await tester.pump(const Duration(milliseconds: 120));
+    shell.nav.go(AppPage.settings);
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(find.text('未检查'), findsOneWidget);
+    final check = find.byKey(const ValueKey('update-check'));
+    await tester.ensureVisible(check);
+    await tester.pump();
+    await tester.tap(check);
+    await tester.pump(const Duration(milliseconds: 260));
+    expect(find.text('已是最新'), findsOneWidget);
+    expect(find.byKey(const ValueKey('update-apply')), findsNothing,
+        reason: '没有新版本就不该给安装按钮');
+
+    transport.updateResult = {
+      'ok': true,
+      'current': '1.0.0',
+      'latest': '1.1.0',
+      'has_update': true,
+      'name': 'DGStudio v1.1.0',
+      'notes': '- 修复若干问题',
+      'page': 'https://example.invalid',
+      'asset': {'name': 'a.zip', 'size': 1, 'url': 'https://example.invalid/a'},
+    };
+    await tester.tap(check);
+    await tester.pump(const Duration(milliseconds: 260));
+    expect(find.text('可更新 v1.1.0'), findsOneWidget);
+    expect(find.text('v1.0.0  →  v1.1.0'), findsOneWidget);
+    expect(find.textContaining('修复若干问题'), findsOneWidget);
+
+    final apply = find.byKey(const ValueKey('update-apply'));
+    await tester.ensureVisible(apply);
+    await tester.pump();
+    await tester.tap(apply);
+    await tester.pump(const Duration(milliseconds: 320));
+    expect(transport.calls.any((c) => c.$1 == 'update.download'), isTrue);
+    final call = transport.calls.lastWhere((c) => c.$1 == 'update.apply');
+    expect('${call.$2['path']}', endsWith('.zip'));
   });
 
   testWidgets('设置页文本框：没有确认键、与数字框同高、输入结束自动落盘', (tester) async {

@@ -127,11 +127,29 @@ class AppShellState extends State<AppShell> with WidgetsBindingObserver {
       }
       unawaited(widget.engine.start());
     });
+    // 启动时查一次更新：等引擎连上、config 到了再查，有新版只提示不安装。
+    _updateTimer = Timer(const Duration(seconds: 8), _autoCheckUpdate);
+  }
+
+  Timer? _updateTimer;
+
+  Future<void> _autoCheckUpdate() async {
+    final engine = widget.engine;
+    if (!engine.online) return;
+    final settings = engine.config['settings'];
+    final auto = settings is Map ? settings['update.auto'] : null;
+    if (auto == false) return;
+    await engine.checkUpdate();
+    final info = engine.updateInfo;
+    if (info != null && info['has_update'] == true) {
+      engine.say('发现新版本 v${info['latest']}，可在「设置 → 软件更新」升级');
+    }
   }
 
   @override
   void dispose() {
     _toastTimer?.cancel();
+    _updateTimer?.cancel();
     _merged.removeListener(_onChanged);
     _flow.dispose();
     WidgetsBinding.instance.removeObserver(this);

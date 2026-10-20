@@ -296,3 +296,59 @@ class MarketUpdateFlagTests(unittest.TestCase):
         dev = self._rows([{"id": "y", "version": "2.0.0"}],
                          [{"id": "y", "version": "1.9.9"}])
         self.assertFalse(dev[0]["update"])
+
+class UpdateCheckTests(unittest.TestCase):
+    """软件自更新：版本比较与「没得更新就不让下载 / 安装」。"""
+
+    def _check(self, tag: str) -> dict:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import bridge.update as update
+
+        release = {
+            "tag_name": tag,
+            "name": f"DGStudio {tag}",
+            "body": "- 修复若干问题",
+            "html_url": "https://example.invalid/release",
+            "assets": [
+                {"name": f"DGStudio_{tag}_win64.zip", "size": 123,
+                 "browser_download_url": "https://example.invalid/a.zip"},
+                {"name": "source.zip", "size": 1,
+                 "browser_download_url": "https://example.invalid/s.zip"},
+            ],
+        }
+        with mock.patch.object(update, "_fetch_json", return_value=release):
+            return update.check(SimpleNamespace(), {})
+
+    def test_newer_release_is_an_update(self):
+        from dglab.version import APP_VERSION
+
+        info = self._check("v9.9.9")
+        self.assertTrue(info["ok"])
+        self.assertEqual(info["current"], APP_VERSION)
+        self.assertEqual(info["latest"], "9.9.9")
+        self.assertTrue(info["has_update"])
+        self.assertEqual(info["asset"]["name"], "DGStudio_v9.9.9_win64.zip")
+        self.assertEqual(info["notes"], "- 修复若干问题")
+
+    def test_same_or_older_release_is_not_an_update(self):
+        from dglab.version import APP_VERSION
+
+        self.assertFalse(self._check("v" + APP_VERSION)["has_update"])
+        self.assertFalse(self._check("v0.0.1")["has_update"])
+
+    def test_download_refuses_without_a_newer_release(self):
+        import bridge.update as update
+
+        update._LAST.clear()
+        result = update.download(None, {})
+        self.assertFalse(result["ok"])
+        self.assertIn("最新", result["error"])
+
+    def test_apply_refuses_when_running_from_source(self):
+        import bridge.update as update
+
+        result = update.apply(None, {"path": "x.zip"})
+        self.assertFalse(result["ok"])
+        self.assertIn("源码", result["error"])

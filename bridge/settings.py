@@ -30,6 +30,8 @@ _MAPS: dict[str, tuple[tuple[str, ...], str]] = {
     "market.proxy": (("modules_market", "proxy"), _STRING),
     "market.no_proxy": (("modules_market", "no_proxy"), _BOOL),
     "log.file": (("log_to_file",), _BOOL),
+    # 启动时查一次 GitHub 最新 release；有新版提示，不会自动装。
+    "update.auto": (("update", "auto"), _BOOL),
 }
 
 

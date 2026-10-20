@@ -166,6 +166,95 @@ class StudioEngine extends ChangeNotifier {
     }
   }
 
+  // ---------------------------------------------------------------- 软件更新
+
+  /// 最近一次 `update.check` 的结果；`null` 表示还没查过或查失败。
+  Map<String, Object?>? updateInfo;
+  bool updateChecking = false;
+  bool updateDownloading = false;
+  bool updateApplying = false;
+  String? updateError;
+
+  bool get updateAvailable => updateInfo?['has_update'] == true;
+
+  Future<void> checkUpdate() async {
+    if (updateChecking) return;
+    updateChecking = true;
+    updateError = null;
+    _notify();
+    try {
+      final result = await _transport.request(
+        'update.check',
+        const {},
+        const Duration(seconds: 40),
+      );
+      if (result is Map) {
+        final row = Map<String, Object?>.from(result);
+        if (row['ok'] == true) {
+          updateInfo = row;
+        } else {
+          updateInfo = null;
+          updateError = '${row['error'] ?? '检查更新失败'}';
+        }
+      }
+    } on Object catch (e) {
+      updateError = '$e';
+    } finally {
+      updateChecking = false;
+      _notify();
+    }
+  }
+
+  /// 下载安装包到临时目录，成功后返回可交给 `applyUpdate` 的路径。
+  Future<String?> downloadUpdate() async {
+    if (updateDownloading) return null;
+    updateDownloading = true;
+    updateError = null;
+    _notify();
+    try {
+      final result = await _transport.request(
+        'update.download',
+        const {},
+        const Duration(minutes: 10),
+      );
+      if (result is Map && result['ok'] == true) {
+        return '${result['path'] ?? ''}';
+      }
+      updateError = '${(result is Map ? result['error'] : '') ?? '下载失败'}';
+      return null;
+    } on Object catch (e) {
+      updateError = '$e';
+      return null;
+    } finally {
+      updateDownloading = false;
+      _notify();
+    }
+  }
+
+  /// 让侧车起外部脚本替换安装目录；返回 true 表示外壳现在应当退出。
+  Future<bool> applyUpdate(String path) async {
+    if (updateApplying) return false;
+    updateApplying = true;
+    updateError = null;
+    _notify();
+    try {
+      final result = await _transport.request(
+        'update.apply',
+        {'path': path},
+        const Duration(seconds: 40),
+      );
+      if (result is Map && result['ok'] == true) return true;
+      updateError = '${(result is Map ? result['error'] : '') ?? '安装失败'}';
+      return false;
+    } on Object catch (e) {
+      updateError = '$e';
+      return false;
+    } finally {
+      updateApplying = false;
+      _notify();
+    }
+  }
+
   /// 正在跑长任务（下载 / 装依赖 / 更新）的模块 id；同一模块并发点击直接忽略。
   final Set<String> busyModules = {};
 

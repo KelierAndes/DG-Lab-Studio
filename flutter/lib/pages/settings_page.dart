@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart' hide Stack;
+import 'package:window_manager/window_manager.dart';
 
 import '../app/field_metrics.dart';
 import '../app/studio_prefs.dart';
@@ -210,6 +211,29 @@ class SettingsPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
+          BentoCard(
+            fit: true,
+            title: '软件更新',
+            accent: t.portPositive,
+            trailing: TinyLabel(
+              '只查 GitHub 最新 release，不会偷偷装',
+              color: t.textTertiary,
+              size: 9,
+            ),
+            child: _Rows(
+              children: [
+                _UpdateRow(engine: engine),
+                _SwitchRow(
+                  key: const ValueKey('settings-update-auto'),
+                  label: '启动时检查更新',
+                  desc: '连上引擎后查一次，有新版只提示不安装',
+                  on: _on('update.auto'),
+                  onTap: () => _set('update.auto', !_on('update.auto')),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
           IntrinsicHeight(
             // 配置文件与关于同排：两栏齐底。
             child: BentoLayout(
@@ -307,7 +331,7 @@ class SettingsPage extends StatelessWidget {
                             ),
                             const SizedBox(width: 8),
                             StatusChip(
-                              text: 'v${version['app'] ?? '0.4.1'}',
+                              text: 'v${version['app'] ?? '0.5.0'}',
                               tone: 1,
                             ),
                           ],
@@ -401,6 +425,138 @@ class SettingsPage extends StatelessWidget {
 
   static String _shorten(String path) =>
       path.length <= 44 ? path : '…${path.substring(path.length - 42)}';
+}
+
+/// 软件更新：显示当前 / 最新版本，检查、下载并交给外部脚本替换后重启。
+class _UpdateRow extends StatelessWidget {
+  const _UpdateRow({required this.engine});
+
+  final StudioEngine engine;
+
+  Future<void> _run() async {
+    final path = await engine.downloadUpdate();
+    if (path == null || path.isEmpty) return;
+    if (await engine.applyUpdate(path)) {
+      // 侧车的更新脚本在等这个进程退出，关窗即交接。
+      await windowManager.close();
+    }
+  }
+
+  String get _status {
+    if (engine.updateChecking) return '检查中…';
+    if (engine.updateError != null) return '检查失败';
+    final info = engine.updateInfo;
+    if (info == null) return '未检查';
+    return engine.updateAvailable ? '可更新 v${info['latest']}' : '已是最新';
+  }
+
+  int get _tone {
+    if (engine.updateError != null) return 2;
+    if (engine.updateApplying || engine.updateDownloading) return 3;
+    if (engine.updateInfo == null) return 0;
+    return engine.updateAvailable ? 1 : 3;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppScope.of(context);
+    final info = engine.updateInfo;
+    final notes = '${info?['notes'] ?? ''}'.trim();
+    final busy = engine.updateChecking ||
+        engine.updateDownloading ||
+        engine.updateApplying;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 4, 0, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              StatusChip(text: _status, tone: _tone),
+              const SizedBox(width: 8),
+              Text(
+                '当前 v${engine.config['version'] is Map ? (engine.config['version'] as Map)['app'] ?? '' : ''}',
+                style: TextStyle(
+                  fontFamily: 'Consolas',
+                  fontSize: 10.5,
+                  height: 1.2,
+                  color: t.textSecondary,
+                ),
+              ),
+              const Spacer(),
+              GhostButton(
+                key: const ValueKey('update-check'),
+                label: engine.updateChecking ? '检查中…' : '检查更新',
+                icon: Icons.refresh_rounded,
+                dense: true,
+                onTap: busy ? () {} : () => engine.checkUpdate(),
+              ),
+            ],
+          ),
+          if (engine.updateError != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              engine.updateError!,
+              style: TextStyle(fontSize: 10, height: 1.3, color: t.portNegative),
+            ),
+          ],
+          if (engine.updateAvailable && info != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Text(
+                  'v${info['current']}  →  v${info['latest']}',
+                  style: TextStyle(
+                    fontFamily: 'Consolas',
+                    fontSize: 13,
+                    height: 1.2,
+                    fontWeight: FontWeight.w600,
+                    color: t.textPrimary,
+                  ),
+                ),
+                const Spacer(),
+                GhostButton(
+                  key: const ValueKey('update-apply'),
+                  label: engine.updateApplying
+                      ? '正在安装…'
+                      : (engine.updateDownloading ? '下载中…' : '立即更新'),
+                  icon: Icons.system_update_alt_rounded,
+                  dense: true,
+                  active: true,
+                  onTap: busy ? () {} : () { _run(); },
+                ),
+              ],
+            ),
+            if (notes.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              WellBox(
+                padding: const EdgeInsets.fromLTRB(9, 7, 9, 7),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 132),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      notes,
+                      style: TextStyle(
+                        fontFamily: 'Consolas',
+                        fontSize: 10,
+                        height: 1.45,
+                        color: t.textSecondary,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 4),
+            Text(
+              '关窗后自动替换并重新启动；config.json、config 与 modules 不会被覆盖',
+              style: TextStyle(fontSize: 9.5, height: 1.3, color: t.textTertiary),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 class _Rows extends StatelessWidget {

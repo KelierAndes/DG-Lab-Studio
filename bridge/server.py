@@ -29,6 +29,7 @@ from bridge.deps import MODULE_DEP_METHODS
 from bridge.detectors import DETECTOR_METHODS
 from bridge.flow import FLOW_METHODS
 from bridge.settings import SETTINGS_METHODS, settings_payload
+from bridge.update import UPDATE_METHODS
 from dglab.state import EngineState
 from dglab.version import APP_VERSION
 from module_store import version_key
@@ -493,6 +494,7 @@ METHODS: dict[str, Callable[[Engine, dict], Any]] = {
     "market.fetch": _market_fetch,
     **FLOW_METHODS,
     **SETTINGS_METHODS,
+    **UPDATE_METHODS,
     "market.install": _market_install,
     "modules.update": _modules_update,
     "modules.delete": _modules_delete,
@@ -607,7 +609,8 @@ class Bridge:
                  "bindings.get", "detectors.state", "modules.deps",
                  "modules.readme",
                  "engine.channels", "engine.qr", "engine.local_ip", "engine.wave_history",
-                 "engine.intensity_params"}
+                 "engine.intensity_params",
+                 "update.check", "update.download", "update.apply"}
 
     async def _call(self, connection, request: dict, is_authed) -> None:
         rid = request.get("id")

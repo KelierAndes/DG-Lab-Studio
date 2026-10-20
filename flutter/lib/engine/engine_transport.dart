@@ -343,6 +343,16 @@ class MockEngineTransport implements EngineTransport {
             enabled: on, loaded: on, running: on);
       case 'market.fetch':
         return _marketRows();
+      case 'update.check':
+        return Map<String, Object?>.of(updateResult);
+      case 'update.download':
+        return {
+          'ok': true,
+          'path': 'C:/Users/Public/dgstudio_update/DGStudio_v9.9.9_win64.zip',
+          'size': 55,
+        };
+      case 'update.apply':
+        return {'ok': true, 'restart': true};
       case 'engine.config_get':
         return _config();
       case 'engine.config_set':
@@ -1653,6 +1663,18 @@ class MockEngineTransport implements EngineTransport {
 
   /// 卡片目录的版本：测试里加一，验证事件流页会因为目录换代而整份重取。
   int catalogRev = 1;
+
+  /// `update.check` 的演示结果：测试改这个字段来摆「已是最新 / 有新版」两种状态。
+  Map<String, Object?> updateResult = {
+    'ok': true,
+    'current': '1.0.0',
+    'latest': '1.0.0',
+    'has_update': false,
+    'name': 'DGStudio v1.0.0',
+    'notes': '',
+    'page': 'https://github.com/KelierAndes/DG-Lab-Studio/releases',
+    'asset': null,
+  };
 
   /// 演示市场：同版本已装的、有新版可更的、没装过的各一条。
   /// 「更新」只在市场版本比装着的版本新时出现（比较按数字段，不是字符串）。
