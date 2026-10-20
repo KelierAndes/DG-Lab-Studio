@@ -317,8 +317,8 @@ class ModuleStore:
             handlers.append(urllib.request.ProxyHandler(
                 {"http": self.proxy, "https": self.proxy}))
         elif self.no_proxy:
-            handlers.append(urllib.request.ProxyHandler(
-                {"http": None, "https": None}))
+            # Python 3.14 不接受 None 值；空字典才是「不走代理」。
+            handlers.append(urllib.request.ProxyHandler({}))
         return urllib.request.build_opener(*handlers) if handlers else None
 
     def _log(self, message: str) -> None:

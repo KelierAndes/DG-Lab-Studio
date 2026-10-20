@@ -408,6 +408,61 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertIn("源码", result["error"])
 
 
+class UpdateFallbackTests(unittest.TestCase):
+    """API 限流时走 releases/latest 跳转，安装包按命名约定拼出来。"""
+
+    def test_redirect_fallback_resolves_tag_and_asset(self):
+        from unittest import mock
+
+        import bridge.update as update
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def geturl(self):
+                return "https://github.com/KelierAndes/DG-Lab-Studio/releases/tag/v1.2.3"
+
+        class _Opener:
+            def open(self, request, timeout=0):
+                return _Resp()
+
+        with mock.patch.object(update, "_sources",
+                               return_value=[("直连", _Opener(),
+                                              "https://example.invalid")]),                 mock.patch.object(update, "_asset_size", return_value=42):
+            info = update._check_via_redirect({})
+        self.assertEqual(info["tag"], "v1.2.3")
+        self.assertEqual(info["asset_name"], "DGStudio_v1.2.3_win64.zip")
+        self.assertEqual(info["asset_url"],
+                         "https://github.com/KelierAndes/DG-Lab-Studio/"
+                         "releases/download/v1.2.3/DGStudio_v1.2.3_win64.zip")
+        self.assertEqual(info["size"], 42)
+
+    def test_check_uses_fallback_when_api_fails(self):
+        from unittest import mock
+
+        import bridge.update as update
+
+        with mock.patch.object(update, "_fetch_json",
+                               side_effect=RuntimeError("403 rate limit")),                 mock.patch.object(update, "_check_via_redirect",
+                                  return_value={
+                                      "tag": "v9.9.9",
+                                      "asset_name": "DGStudio_v9.9.9_win64.zip",
+                                      "asset_url": "https://example.invalid/a.zip",
+                                      "size": 7, "name": "DGStudio v9.9.9",
+                                      "notes": "", "page": "https://example.invalid",
+                                  }):
+            info = update.check(None, {})
+        self.assertTrue(info["ok"], info)
+        self.assertTrue(info["has_update"])
+        self.assertEqual(info["latest"], "9.9.9")
+        self.assertEqual(info["source"], "releases/latest")
+        self.assertEqual(info["asset"]["size"], 7)
+
+
 class UpdateVerifyTests(unittest.TestCase):
     """哈希 + 签名：任何一项对不上都不能进入安装流程。"""
 

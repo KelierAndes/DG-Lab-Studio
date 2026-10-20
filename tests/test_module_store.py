@@ -513,9 +513,10 @@ class MarketSettingsTests(unittest.TestCase):
         self.market["proxy"] = ""
         self.market["no_proxy"] = True
         opener = self.store._network_opener()
-        direct = next(h for h in opener.handlers
-                      if isinstance(h, ProxyHandler))
-        self.assertEqual(direct.proxies, {"http": None, "https": None})
+        # Python 3.14 的 ProxyHandler 不吃 None 值；「不走代理」用空字典，
+        # build_opener 会把它连同默认代理一起过滤掉——效果就是直连。
+        self.assertFalse(any(isinstance(h, ProxyHandler)
+                             for h in opener.handlers))
 
 
 class DownloadTests(unittest.TestCase):

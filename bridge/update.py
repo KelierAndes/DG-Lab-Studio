@@ -74,8 +74,9 @@ def _update_dir() -> Path:
 
 def _direct():
     # 直连就是不走系统代理：模块市场里配的代理不一定适合 GitHub release。
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({"http": None, "https": None}))
+    # 注意 Python 3.14 的 ProxyHandler 不接受 None 值（proxy_open 会拿 None 去
+    # 正则匹配直接 TypeError），「不走代理」要用空字典。
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def _proxied(url: str):
@@ -191,13 +192,85 @@ def _fetch_json(url: str, engine: Any) -> dict:
     return json.loads(data.decode("utf-8"))
 
 
+def _asset_size(url: str, engine: Any) -> int:
+    """用 HEAD 问一下 Content-Length；问不到就按 0（界面显示 --）。"""
+    for _label, opener, target in _sources(url, engine):
+        try:
+            request = urllib.request.Request(
+                target, method="HEAD", headers={"User-Agent": _USER_AGENT})
+            with opener.open(request, timeout=_CHECK_TIMEOUT) as resp:
+                return int(resp.headers.get("Content-Length") or 0)
+        except Exception:
+            continue
+    return 0
+
+
+def _check_via_redirect(engine: Any) -> dict:
+    """API 被限流时的退路：走 releases/latest 跳转拿 tag，安装包按命名约定拼。
+
+    接口每小时只有 60 次匿名额度，国内出口常被共用；下载链接本身不受配额影响。
+    """
+    url = f"https://github.com/{REPO}/releases/latest"
+    errors: list[str] = []
+    tag = ""
+    for label, opener, target in _sources(url, engine):
+        try:
+            with opener.open(_request(target), timeout=_CHECK_TIMEOUT) as resp:
+                final = resp.geturl()
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+        candidate = final.rstrip("/").rsplit("/", 1)[-1]
+        if candidate.startswith("v"):
+            tag = candidate
+            break
+    if not tag:
+        raise RuntimeError("；".join(errors) or "拿不到最新版本号")
+    asset_name = f"DGStudio_{tag}_win64.zip"
+    asset_url = (f"https://github.com/{REPO}/releases/download/{tag}/"
+                 f"{asset_name}")
+    return {
+        "tag": tag,
+        "asset_name": asset_name,
+        "asset_url": asset_url,
+        "size": _asset_size(asset_url, engine),
+        "name": tag,
+        "notes": "",
+        "page": f"https://github.com/{REPO}/releases/tag/{tag}",
+    }
+
+
 def check(engine: Any, params: dict) -> dict:
-    """查最新 release；任何失败都收成 error 文案，界面不用分辨异常类型。"""
+    """查最新 release；API 被限流时退回 releases/latest 跳转。"""
     try:
         release = _fetch_json(_API, engine)
-    except Exception as exc:
-        return {"ok": False, "current": APP_VERSION,
-                "error": f"检查更新失败：{exc}"}
+    except Exception:
+        try:
+            fallback = _check_via_redirect(engine)
+        except Exception as exc:
+            return {"ok": False, "current": APP_VERSION,
+                    "error": f"检查更新失败：{exc}"}
+        tag = fallback["tag"]
+        info = {
+            "ok": True,
+            "current": APP_VERSION,
+            "latest": tag.lstrip("vV"),
+            "has_update": version_key(tag) > version_key(APP_VERSION),
+            "name": fallback["name"],
+            "notes": "",
+            "page": fallback["page"],
+            "checked_at": time.time(),
+            "source": "releases/latest",
+            "asset": {
+                "name": fallback["asset_name"],
+                "size": fallback["size"],
+                "url": fallback["asset_url"],
+                "digest": "",
+            },
+        }
+        _LAST.clear()
+        _LAST.update(info)
+        return info
     tag = str(release.get("tag_name") or "").lstrip("vV")
     assets = [a for a in (release.get("assets") or []) if isinstance(a, dict)]
     asset = next((a for a in assets
