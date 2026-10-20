@@ -13,6 +13,7 @@ import '../chrome/primitives.dart';
 import '../engine/engine_state.dart';
 import 'actions.dart';
 import 'app_pages.dart';
+import 'update_prompt.dart';
 
 /// 设置：外观属于外壳，连接、市场、日志与配置文件属于引擎。
 class SettingsPage extends StatelessWidget {
@@ -331,7 +332,7 @@ class SettingsPage extends StatelessWidget {
                             ),
                             const SizedBox(width: 8),
                             StatusChip(
-                              text: 'v${version['app'] ?? '0.5.0'}',
+                              text: 'v${version['app'] ?? '0.6.0'}',
                               tone: 1,
                             ),
                           ],
@@ -427,6 +428,71 @@ class SettingsPage extends StatelessWidget {
       path.length <= 44 ? path : '…${path.substring(path.length - 42)}';
 }
 
+/// 下载进度 / 校验状态：一条细进度条 + 「12.3 / 53.0 MB · 23% · 直连」。
+class _UpdateProgress extends StatelessWidget {
+  const _UpdateProgress({required this.engine});
+
+  final StudioEngine engine;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppScope.of(context);
+    final stage = engine.updateStage;
+    final source = engine.updateSource;
+    final fraction = engine.updateFraction;
+    final received = engine.updateReceived;
+    final total = engine.updateTotal;
+    final (text, color) = switch (stage) {
+      'verify' => ('正在校验 SHA-256 与发布签名…', t.textSecondary),
+      'done' => (
+        '已下载并校验通过（SHA-256 + 签名）'
+            '${source.isEmpty ? '' : ' · $source'}',
+        t.portPositive
+      ),
+      'error' => (engine.updateError ?? '更新失败', t.portNegative),
+      _ => (
+        total > 0
+            ? '${formatBytes(received)} / ${formatBytes(total)}'
+                ' · ${(fraction == null ? 0 : fraction * 100).round()}%'
+                '${source.isEmpty ? '' : ' · $source'}'
+            : '正在下载…${source.isEmpty ? '' : ' · $source'}',
+        t.textSecondary
+      ),
+    };
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (stage == 'download')
+          LayoutBuilder(
+            builder: (context, box) => Container(
+              height: 8,
+              decoration: BoxDecoration(
+                color: t.wellDeep,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  width: box.maxWidth * (fraction ?? 0),
+                  decoration: BoxDecoration(
+                    color: t.portPositive,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        if (stage == 'download') const SizedBox(height: 5),
+        Text(
+          text,
+          key: const ValueKey('update-progress-text'),
+          style: TextStyle(fontSize: 9.5, height: 1.3, color: color),
+        ),
+      ],
+    );
+  }
+}
+
 /// 软件更新：显示当前 / 最新版本，检查、下载并交给外部脚本替换后重启。
 class _UpdateRow extends StatelessWidget {
   const _UpdateRow({required this.engine});
@@ -434,12 +500,8 @@ class _UpdateRow extends StatelessWidget {
   final StudioEngine engine;
 
   Future<void> _run() async {
-    final path = await engine.downloadUpdate();
-    if (path == null || path.isEmpty) return;
-    if (await engine.applyUpdate(path)) {
-      // 侧车的更新脚本在等这个进程退出，关窗即交接。
-      await windowManager.close();
-    }
+    // 侧车的更新脚本在等这个进程退出，关窗即交接。
+    if (await engine.runUpdate()) await windowManager.close();
   }
 
   String get _status {
@@ -514,6 +576,12 @@ class _UpdateRow extends StatelessWidget {
                     color: t.textPrimary,
                   ),
                 ),
+                const SizedBox(width: 10),
+                TinyLabel(
+                  '安装包 ${formatBytes((info['asset'] is Map ? (info['asset'] as Map)['size'] as num? : 0)?.toInt() ?? 0)}',
+                  color: t.textTertiary,
+                  size: 9,
+                ),
                 const Spacer(),
                 GhostButton(
                   key: const ValueKey('update-apply'),
@@ -546,6 +614,10 @@ class _UpdateRow extends StatelessWidget {
                   ),
                 ),
               ),
+            ],
+            if (engine.updateStage.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _UpdateProgress(engine: engine),
             ],
             const SizedBox(height: 4),
             Text(

@@ -121,15 +121,37 @@ class _TopBarState extends State<TopBar> with WindowListener {
                   const SizedBox(width: 14),
                   for (final p in AppPage.values) ...[
                     if (p != AppPage.values.first) const SizedBox(width: 7),
-                    OptionPill(
-                      key: ValueKey('nav-${p.name}'),
-                      label: p.label,
-                      dense: true,
-                      // 与右侧窗口按钮（28）取 85% 左右的同高，太小点不着也看不清。
-                      height: 24,
-                      fontSize: 11,
-                      active: widget.nav.page == p,
-                      onTap: () => widget.nav.go(p),
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        OptionPill(
+                          key: ValueKey('nav-${p.name}'),
+                          label: p.label,
+                          dense: true,
+                          // 与右侧窗口按钮（28）取 85% 左右的同高，太小点不着也看不清。
+                          height: 24,
+                          fontSize: 11,
+                          active: widget.nav.page == p,
+                          onTap: () => widget.nav.go(p),
+                        ),
+                        // 有新版本时「设置」右上角挂一颗红点：不点进设置也看得见。
+                        if (p == AppPage.settings &&
+                            widget.engine.updateAvailable)
+                          Positioned(
+                            right: -1,
+                            top: -1,
+                            child: Container(
+                              key: const ValueKey('nav-update-dot'),
+                              width: 7,
+                              height: 7,
+                              decoration: BoxDecoration(
+                                color: t.portNegative,
+                                shape: BoxShape.circle,
+                                border: Border.all(color: t.surface, width: 1.2),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ],
                 ],
@@ -139,6 +161,19 @@ class _TopBarState extends State<TopBar> with WindowListener {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // 有新版时右上角直接给一颗可点的胶囊，点它去设置页更新。
+                    if (widget.engine.updateAvailable) ...[
+                      GestureDetector(
+                        key: const ValueKey('bar-update'),
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => widget.nav.go(AppPage.settings),
+                        child: StatusChip(
+                          text: '可更新 v${widget.engine.updateInfo?['latest'] ?? ''}',
+                          tone: 1,
+                        ),
+                      ),
+                      const SizedBox(width: 7),
+                    ],
                     StatusChip(
                       text: widget.engine.online
                           ? '${s.backend.toUpperCase()} · ${s.connected ? '已连接' : '未连接'}'

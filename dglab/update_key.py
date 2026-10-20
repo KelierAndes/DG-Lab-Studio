@@ -1,0 +1,10 @@
+"""发布签名公钥：更新包只认这把钥匙签过的指纹。
+
+私钥不进仓库（`~/.dgstudio/update_signing_key.pem`），发版前用
+`python _tools/sign_update.py dist/DGStudio_vX_win64.zip` 生成 `.sha256` 与 `.sig`，
+两个文件一起传到 release，更新器下载后先核对哈希、再验这把公钥的签名。
+"""
+
+MODULUS = 0xdd2a70375efaf405a0926ffade88163c77b88faca089addb9066f55b0b6edfb8771fbb3f6fb1c8de637fc76a56103c5f8c0028f62480a34860617db284eaeb1389cc8d75a8c6dd81c0942e373bb1f2e42959ba585b6b8faa8f5e4c66299df57e7a74e72f1b7955f0a1331c20629675dd04a93ebb16ed76333002656017e5760be500514e7efab76c3c111eba1db844ab59691b041ffe5a2bed7248c811f75590329af40d7287659e39665fffbd0eadeef652f65a13838964850e73a9eaa2d81ab47b3ec36c07039dca6f107077842a5bf26fd97c6ed523475c669e0c59c478126811f674c9cf65cfa31bcdf3d33c9ce111ea4e768d0c402a92810131538104ef
+
+EXPONENT = 65537

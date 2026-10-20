@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../pages/update_prompt.dart';
+
 import '../chrome/nav_rail.dart';
 import '../chrome/scroll_guard.dart';
 import '../chrome/device_icons.dart';
@@ -141,9 +143,19 @@ class AppShellState extends State<AppShell> with WidgetsBindingObserver {
     if (auto == false) return;
     await engine.checkUpdate();
     final info = engine.updateInfo;
-    if (info != null && info['has_update'] == true) {
-      engine.say('发现新版本 v${info['latest']}，可在「设置 → 软件更新」升级');
-    }
+    if (info == null || info['has_update'] != true) return;
+    if (!mounted) return;
+    // 启动这次给弹窗；用户手动点「检查更新」时只在设置卡里显示，不再弹。
+    await showUpdatePrompt(context, engine,
+        tokens: tokens, palette: const [], onUpdate: _startUpdate);
+  }
+
+  /// 下载 + 校验 + 交给侧车替换；成功后关窗，由更新脚本接管重启。
+  Future<void> _startUpdate() async {
+    final engine = widget.engine;
+    _nav.go(AppPage.settings);
+    final ok = await engine.runUpdate();
+    if (ok) await windowManager.close();
   }
 
   @override

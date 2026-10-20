@@ -1673,8 +1673,15 @@ class MockEngineTransport implements EngineTransport {
     'name': 'DGStudio v1.0.0',
     'notes': '',
     'page': 'https://github.com/KelierAndes/DG-Lab-Studio/releases',
-    'asset': null,
+    'asset': {
+      'name': 'DGStudio_v1.0.0_win64.zip',
+      'size': 55555555,
+      'url': 'https://example.invalid/a.zip',
+    },
   };
+
+  /// 测试钩子：模拟侧车推来的更新进度（界面靠它画进度条）。
+  void emitUpdate(Map<String, Object?> row) => _emit('update', row);
 
   /// 演示市场：同版本已装的、有新版可更的、没装过的各一条。
   /// 「更新」只在市场版本比装着的版本新时出现（比较按数字段，不是字符串）。

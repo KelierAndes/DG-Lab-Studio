@@ -29,7 +29,7 @@ from bridge.deps import MODULE_DEP_METHODS
 from bridge.detectors import DETECTOR_METHODS
 from bridge.flow import FLOW_METHODS
 from bridge.settings import SETTINGS_METHODS, settings_payload
-from bridge.update import UPDATE_METHODS
+from bridge.update import UPDATE_METHODS, set_publisher
 from dglab.state import EngineState
 from dglab.version import APP_VERSION
 from module_store import version_key
@@ -526,6 +526,8 @@ class Bridge:
         self.authed: set[Any] = set()
         # 外壳重连（或启动晚于引擎）时不该看到一片空白，最近几条日志随身带上。
         self.recent_logs: deque[list] = deque(maxlen=200)
+        # 更新下载/校验的进度：侧车线程里算，推给界面画进度条。
+        set_publisher(self.publish)
 
     # 事件回调可能来自引擎线程，也可能来自循环本身，统一走 threadsafe。
     def publish(self, event: str, data: Any) -> None:

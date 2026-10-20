@@ -170,6 +170,8 @@ class StudioEngine extends ChangeNotifier {
 
   /// 最近一次 `update.check` 的结果；`null` 表示还没查过或查失败。
   Map<String, Object?>? updateInfo;
+  /// 侧车推来的下载进度：{stage: download/verify/done/error, received, total, source}。
+  Map<String, Object?> updateProgress = const {};
   bool updateChecking = false;
   bool updateDownloading = false;
   bool updateApplying = false;
@@ -177,10 +179,21 @@ class StudioEngine extends ChangeNotifier {
 
   bool get updateAvailable => updateInfo?['has_update'] == true;
 
+  int get updateTotal => (updateProgress['total'] as num?)?.toInt() ?? 0;
+  int get updateReceived => (updateProgress['received'] as num?)?.toInt() ?? 0;
+  String get updateSource => '${updateProgress['source'] ?? ''}';
+  String get updateStage => '${updateProgress['stage'] ?? ''}';
+  double? get updateFraction {
+    final total = updateTotal;
+    if (total <= 0) return null;
+    return (updateReceived / total).clamp(0.0, 1.0);
+  }
+
   Future<void> checkUpdate() async {
     if (updateChecking) return;
     updateChecking = true;
     updateError = null;
+    updateProgress = const {};
     _notify();
     try {
       final result = await _transport.request(
@@ -229,6 +242,13 @@ class StudioEngine extends ChangeNotifier {
       updateDownloading = false;
       _notify();
     }
+  }
+
+  /// 下载 + 校验 + 交给侧车安装；返回 true 表示外壳现在应当退出。
+  Future<bool> runUpdate() async {
+    final path = await downloadUpdate();
+    if (path == null || path.isEmpty) return false;
+    return applyUpdate(path);
   }
 
   /// 让侧车起外部脚本替换安装目录；返回 true 表示外壳现在应当退出。
@@ -533,6 +553,14 @@ class StudioEngine extends ChangeNotifier {
         // 用户正看着这张卡就得跟着换，不能等他切走再切回来。
         final open = settingsModuleId;
         if (open != null) unawaited(reloadSettings(open));
+      case 'update':
+        final row = msg.data;
+        if (row is Map) {
+          updateProgress = Map<String, Object?>.from(row);
+          if (updateProgress['stage'] == 'error') {
+            updateError = '${updateProgress['error'] ?? '更新失败'}';
+          }
+        }
       case 'config':
         config = Map<String, Object?>.from(msg.data as Map);
       case 'market':

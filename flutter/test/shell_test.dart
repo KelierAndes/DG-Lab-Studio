@@ -292,6 +292,66 @@ void main() {
     expect(label.style!.color, Colors.white, reason: '白字也不跟着主题变');
   });
 
+  // 有新版本时：顶栏胶囊 + 设置角标都要出现，点胶囊跳设置页。
+  testWidgets('有新版本时顶栏出现可点胶囊，设置页签挂红点', (tester) async {
+    final transport = MockEngineTransport(heartbeat: false);
+    transport.updateResult = {
+      ...transport.updateResult,
+      'latest': '1.1.0',
+      'has_update': true,
+    };
+    final engine = StudioEngine(transport);
+    addTearDown(engine.dispose);
+    final shell = await bootShell<AppShellState>(
+      tester,
+      AppShell(engine: engine),
+    );
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(find.byKey(const ValueKey('bar-update')), findsNothing,
+        reason: '还没查过就不该提示');
+
+    await shell.engine.checkUpdate();
+    await tester.pump(const Duration(milliseconds: 260));
+    expect(find.text('可更新 v1.1.0'), findsOneWidget);
+    expect(find.byKey(const ValueKey('nav-update-dot')), findsOneWidget);
+
+    shell.nav.go(AppPage.dashboard);
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.byKey(const ValueKey('bar-update')));
+    await tester.pump(const Duration(milliseconds: 260));
+    expect(shell.nav.page, AppPage.settings, reason: '点胶囊要跳到设置页');
+  });
+
+  // 启动时查到新版本弹窗；「稍后」只关弹窗，不开始下载。
+  testWidgets('启动检查到新版本会弹窗，稍后不下载', (tester) async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel('window_manager'),
+      (call) async => null,
+    );
+    final transport = MockEngineTransport(heartbeat: false);
+    transport.updateResult = {
+      ...transport.updateResult,
+      'latest': '1.1.0',
+      'has_update': true,
+      'notes': '- 修复若干问题',
+    };
+    final engine = StudioEngine(transport);
+    addTearDown(engine.dispose);
+    await bootShell<AppShellState>(tester, AppShell(engine: engine));
+    await tester.pump(const Duration(milliseconds: 120));
+    await tester.pump(const Duration(seconds: 9));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('发现新版本 v1.1.0'), findsOneWidget);
+    expect(find.text('立即更新'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('update-later')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('发现新版本 v1.1.0'), findsNothing);
+    expect(transport.calls.any((c) => c.$1 == 'update.download'), isFalse);
+  });
+
   // 软件更新：只在检测到更新时才露出「立即更新」，点下去按「下载 → 安装」两步走。
   testWidgets('软件更新卡：检查后按版本决定是否给「立即更新」', (tester) async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -332,7 +392,8 @@ void main() {
     };
     await tester.tap(check);
     await tester.pump(const Duration(milliseconds: 260));
-    expect(find.text('可更新 v1.1.0'), findsOneWidget);
+    // 顶栏胶囊与设置卡的状态胶囊各一颗。
+    expect(find.text('可更新 v1.1.0'), findsNWidgets(2));
     expect(find.text('v1.0.0  →  v1.1.0'), findsOneWidget);
     expect(find.textContaining('修复若干问题'), findsOneWidget);
 
@@ -344,6 +405,33 @@ void main() {
     expect(transport.calls.any((c) => c.$1 == 'update.download'), isTrue);
     final call = transport.calls.lastWhere((c) => c.$1 == 'update.apply');
     expect('${call.$2['path']}', endsWith('.zip'));
+
+    // 大小与进度：侧车推 received/total，卡片要写出已下载量与百分比。
+    transport.emitUpdate({
+      'stage': 'download',
+      'received': 26 << 20,
+      'total': 53 << 20,
+      'source': 'ghfast.top',
+    });
+    await tester.pump(const Duration(milliseconds: 220));
+    final progress = find.byKey(const ValueKey('update-progress-text'));
+    expect(progress, findsOneWidget);
+    final text = (tester.widget<Text>(progress)).data ?? '';
+    expect(text, contains('26.0 MB'));
+    expect(text, contains('49%'));
+    expect(text, contains('ghfast.top'));
+
+    transport.emitUpdate({
+      'stage': 'done',
+      'received': 53 << 20,
+      'total': 53 << 20,
+      'source': 'ghfast.top',
+    });
+    await tester.pump(const Duration(milliseconds: 220));
+    expect(
+      (tester.widget<Text>(progress)).data ?? '',
+      contains('校验通过'),
+    );
   });
 
   testWidgets('设置页文本框：没有确认键、与数字框同高、输入结束自动落盘', (tester) async {

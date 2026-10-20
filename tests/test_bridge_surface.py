@@ -297,10 +297,61 @@ class MarketUpdateFlagTests(unittest.TestCase):
                          [{"id": "y", "version": "1.9.9"}])
         self.assertFalse(dev[0]["update"])
 
+_TEST_N = int(
+    "af3d5368df57754e50a4e08a62b344c56d991acd7701342c2a8dee543019fdf5"
+    "2d150ecb98f175fb52b03f43b0cf3e97f0d2bbcd69671c54142100cee692f053"
+    "c52deb620b512ef05b9a5e8bd2f925f3b66e0c8dbf047883427429d153bb43e0"
+    "62bbe6c2740ca5549fcb14b154894ba99caad46974cf55bf7fe62756668b5aa3", 16)
+_TEST_E = 65537
+_TEST_D = int(
+    "27107b331232ab664968efdb39946ffcb8e95c05b8852eadb7d0caf3be8354cf"
+    "1e7d26beb13a068c7f8ae5977fe73b3360ce816a119898428ff8297776040489"
+    "b0c524869ab37e9974011747c258e6e32210db52c5e3c3b15be0f5487bac7036"
+    "c911cf1cf224bcfda7bd91a5382347fa7c09a2f2d3e3b46b7f2350266c2344b5", 16)
+
+#: PKCS#1 v1.5 填充头；测试签名与运行时校验共用同一份。
+_PAD_HEAD = bytes([0, 1])
+_PAD_SEP = bytes([0])
+
+
+def _test_sign(manifest: bytes) -> bytes:
+    """测试用私钥按 PKCS#1 v1.5 签一份 manifest（生产私钥不在仓库里）。"""
+    import hashlib
+
+    from bridge.update import _DIGEST_INFO
+
+    size = (_TEST_N.bit_length() + 7) // 8
+    digest = hashlib.sha256(manifest).digest()
+    padding = size - 3 - len(_DIGEST_INFO) - len(digest)
+    block = (_PAD_HEAD + bytes([0xFF]) * padding + _PAD_SEP
+             + _DIGEST_INFO + digest)
+    return pow(int.from_bytes(block, "big"), _TEST_D, _TEST_N).to_bytes(size, "big")
+
+
+class UpdateSourceOrderTests(unittest.TestCase):
+    """取包顺序：直连 → 常用镜像 → 本地端口代理。"""
+
+    def test_direct_then_mirrors_then_proxies(self):
+        from types import SimpleNamespace
+
+        import bridge.update as update
+        from module_store import MIRROR_PRESETS
+
+        engine = SimpleNamespace(
+            config={"modules_market": {"proxy": "http://127.0.0.1:1234"}})
+        labels = [label for label, _opener, _url in
+                  update._sources("https://github.com/a/b.zip", engine)]
+        self.assertEqual(labels[0], "直连")
+        self.assertEqual(labels[1:4], [m.rstrip("/") for m in MIRROR_PRESETS])
+        self.assertTrue(labels[4].startswith("代理 http://127.0.0.1:1234"))
+        self.assertTrue(all(label.startswith("代理") for label in labels[4:]))
+
+
 class UpdateCheckTests(unittest.TestCase):
-    """软件自更新：版本比较与「没得更新就不让下载 / 安装」。"""
+    """软件自更新：版本比较、哈希与签名校验、失败拒绝安装。"""
 
     def _check(self, tag: str) -> dict:
+        import json
         from types import SimpleNamespace
         from unittest import mock
 
@@ -318,8 +369,10 @@ class UpdateCheckTests(unittest.TestCase):
                  "browser_download_url": "https://example.invalid/s.zip"},
             ],
         }
-        with mock.patch.object(update, "_fetch_json", return_value=release):
-            return update.check(SimpleNamespace(), {})
+        with mock.patch.object(
+                update, "_read",
+                return_value=(json.dumps(release).encode(), "直连")):
+            return update.check(SimpleNamespace(config={}), {})
 
     def test_newer_release_is_an_update(self):
         from dglab.version import APP_VERSION
@@ -330,6 +383,7 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertEqual(info["latest"], "9.9.9")
         self.assertTrue(info["has_update"])
         self.assertEqual(info["asset"]["name"], "DGStudio_v9.9.9_win64.zip")
+        self.assertEqual(info["asset"]["size"], 123)
         self.assertEqual(info["notes"], "- 修复若干问题")
 
     def test_same_or_older_release_is_not_an_update(self):
@@ -352,3 +406,80 @@ class UpdateCheckTests(unittest.TestCase):
         result = update.apply(None, {"path": "x.zip"})
         self.assertFalse(result["ok"])
         self.assertIn("源码", result["error"])
+
+
+class UpdateVerifyTests(unittest.TestCase):
+    """哈希 + 签名：任何一项对不上都不能进入安装流程。"""
+
+    def setUp(self):
+        import hashlib
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        import bridge.update as update
+
+        self.update = update
+        self.dir = Path(tempfile.mkdtemp(prefix="dgstudio_update_"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.payload = b"PK fake zip payload"
+        self.manifest = (hashlib.sha256(self.payload).hexdigest()
+                         + "  DGStudio_test_win64.zip\n").encode()
+        self.signature = _test_sign(self.manifest)
+        update._LAST.clear()
+        update._LAST.update({
+            "has_update": True,
+            "asset": {"url": "https://example.invalid/a.zip",
+                      "name": "DGStudio_test_win64.zip",
+                      "size": len(self.payload)},
+        })
+
+    def _download(self, manifest=None, signature=None, missing_sig=False):
+        from unittest import mock
+
+        manifest = self.manifest if manifest is None else manifest
+        signature = self.signature if signature is None else signature
+
+        def fake_stream(_url, _engine, target, _total):
+            target.write_bytes(self.payload)
+            return "直连"
+
+        def fake_read(url, _engine, **_kwargs):
+            if url.endswith(".sha256"):
+                return manifest, "直连"
+            if url.endswith(".sig"):
+                if missing_sig:
+                    raise RuntimeError("404")
+                return signature, "直连"
+            raise RuntimeError("unexpected")
+
+        with mock.patch.object(self.update, "_update_dir",
+                               return_value=self.dir), \
+                mock.patch.object(self.update, "_stream", fake_stream), \
+                mock.patch.object(self.update, "_read", fake_read), \
+                mock.patch.object(self.update.update_key, "MODULUS", _TEST_N), \
+                mock.patch.object(self.update.update_key, "EXPONENT", _TEST_E):
+            return self.update.download(None, {})
+
+    def test_good_package_is_verified(self):
+        result = self._download()
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["verified"])
+        self.assertTrue(result["path"].endswith(".zip"))
+        self.assertEqual(result["size"], len(self.payload))
+
+    def test_wrong_hash_is_rejected(self):
+        bad = ("0" * 64 + "  x.zip\n").encode()
+        result = self._download(manifest=bad)
+        self.assertFalse(result["ok"])
+        self.assertIn("哈希", result["error"])
+
+    def test_missing_signature_is_rejected(self):
+        result = self._download(missing_sig=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("签名", result["error"])
+
+    def test_tampered_signature_is_rejected(self):
+        result = self._download(signature=bytes(128))
+        self.assertFalse(result["ok"])
+        self.assertIn("签名", result["error"])

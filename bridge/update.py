@@ -1,11 +1,19 @@
-"""软件自更新：查 GitHub 最新 release、下载安装包、交给外部脚本替换并重启。
+"""软件自更新：查 GitHub 最新 release、校验并下载安装包、交给外部脚本替换并重启。
 
-界面只负责点按钮和显示进度；版本比较、下载地址与替换脚本都在这里，
-免得前端各自猜「哪个 zip 才是 Windows 安装包」。
+几条硬约束：
+
+* 安装包必须同时通过 **哈希**（release 里的 `.sha256`）与 **签名**
+  （`.sha256` 的 RSA 签名，公钥内置在 `dglab/update_key.py`）才会被安装；
+  签名文件缺失或不匹配一律拒绝，而不是「跳过校验继续装」。
+* 取包顺序照用户要求：**直连 → 常用镜像 → 本地端口代理**，每一跳都换了
+  代理/地址重新试，任何一跳成功就停。
+* 下载与校验过程通过 `set_publisher` 推给界面，界面据此显示大小与进度。
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -14,20 +22,39 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from dglab import update_key
 from dglab.version import APP_VERSION
-from module_store import version_key
+from module_store import MIRROR_PRESETS, PROXY_PRESETS, version_key
 
 REPO = "KelierAndes/DG-Lab-Studio"
 _API = f"https://api.github.com/repos/{REPO}/releases/latest"
 _ASSET_SUFFIX = "_win64.zip"
-_HTTP_TIMEOUT = 20.0
-_DOWNLOAD_TIMEOUT = 120.0
+_CHECK_TIMEOUT = 12.0
+_FILE_TIMEOUT = 30.0
+_DOWNLOAD_TIMEOUT = 60.0
 _USER_AGENT = f"DGStudio/{APP_VERSION}"
+_PROGRESS_STEP = 1 << 20
+_PROGRESS_GAP = 0.15
 
 #: 最近一次检查的结果。下载与安装只认它（安装包地址不从界面回传，免得被拼任意路径）。
 _LAST: dict[str, Any] = {}
+_publisher: Callable[[str, Any], None] | None = None
+
+
+def set_publisher(publish: Callable[[str, Any], None] | None) -> None:
+    global _publisher
+    _publisher = publish
+
+
+def _emit(payload: dict) -> None:
+    if _publisher is None:
+        return
+    try:
+        _publisher("update", payload)
+    except Exception:
+        pass
 
 
 def _app_dir() -> Path:
@@ -42,27 +69,126 @@ def _update_dir() -> Path:
     return path
 
 
-def _opener(engine: Any):
-    store = engine.modules.store
-    opener = store._network_opener()
-    return opener or urllib.request.build_opener()
+# ---------------------------------------------------------------- 取包线路
 
 
-def _mirror(engine: Any, url: str) -> str:
+def _direct():
+    # 直连就是不走系统代理：模块市场里配的代理不一定适合 GitHub release。
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": None, "https": None}))
+
+
+def _proxied(url: str):
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": url, "https": url}))
+
+
+def _proxy_urls(engine: Any) -> list[str]:
+    out: list[str] = []
     try:
-        mirror = engine.modules.store.mirror
+        configured = str(engine.config.get("modules_market", {}).get("proxy") or "")
     except Exception:
-        mirror = ""
-    return engine.modules.store._with_mirror(mirror, url)
+        configured = ""
+    if configured.strip():
+        out.append(configured.strip())
+    for preset in PROXY_PRESETS:
+        if preset not in out:
+            out.append(preset)
+    return out
+
+
+def _sources(url: str, engine: Any):
+    """直连 → 常用镜像 → 本地端口代理，按这个顺序给候选。"""
+    yield "直连", _direct(), url
+    for mirror in MIRROR_PRESETS:
+        yield mirror.rstrip("/"), _direct(), mirror + url
+    for proxy in _proxy_urls(engine):
+        yield f"代理 {proxy}", _proxied(proxy), url
+
+
+def _request(url: str) -> urllib.request.Request:
+    return urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+
+
+def _read(url: str, engine: Any, *,
+          timeout: float = _FILE_TIMEOUT) -> tuple[bytes, str]:
+    """小额文本（release JSON / .sha256 / .sig）：逐条线路试，返回内容与线路。"""
+    errors: list[str] = []
+    for label, opener, target in _sources(url, engine):
+        try:
+            with opener.open(_request(target), timeout=timeout) as resp:
+                return resp.read(), label
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    raise RuntimeError("；".join(errors) or "没有可用的下载线路")
+
+
+# ---------------------------------------------------------------- 校验
+
+
+def verify_sha256(path: Path, manifest: bytes) -> str:
+    """manifest 第一列是十六进制 sha256；对不上就抛错，返回实际摘要。"""
+    expected = manifest.decode("utf-8", "replace").split(None, 1)
+    want = (expected[0] if expected else "").strip().lower()
+    if len(want) != 64:
+        raise ValueError("哈希文件格式不对")
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    got = digest.hexdigest()
+    if not hmac.compare_digest(got, want):
+        raise ValueError(f"哈希不匹配（期望 {want[:16]}…，实际 {got[:16]}…）")
+    return got
+
+
+#: PKCS#1 v1.5 + SHA-256 的 DigestInfo 前缀。
+_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
+
+
+def verify_signature(manifest: bytes, signature: bytes) -> None:
+    """用内置公钥验 `.sha256` 文件的签名；任何不合规都抛 ValueError。"""
+    n = update_key.MODULUS
+    e = update_key.EXPONENT
+    size = (n.bit_length() + 7) // 8
+    if len(signature) != size:
+        raise ValueError("签名长度不对")
+    block = pow(int.from_bytes(signature, "big"), e, n).to_bytes(size, "big")
+    digest = hashlib.sha256(manifest).digest()
+    padding = size - 3 - len(_DIGEST_INFO) - len(digest)
+    if padding < 8:
+        raise ValueError("公钥太短")
+    expected = (b"\x00\x01" + b"\xff" * padding + b"\x00"
+                + _DIGEST_INFO + digest)
+    if not hmac.compare_digest(block, expected):
+        raise ValueError("签名与哈希文件不匹配")
+
+
+def _verify_download(zip_path: Path, engine: Any) -> tuple[str, str]:
+    """下载后立刻验哈希 + 签名；返回 (sha256, 哈希文件线路)。"""
+    _emit({"stage": "verify", "received": 1, "total": 1})
+    base = str((_LAST.get("asset") or {}).get("url") or "")
+    if not base:
+        raise ValueError("没有下载地址")
+    try:
+        manifest, source = _read(base + ".sha256", engine)
+    except Exception as exc:
+        raise ValueError(f"发布缺少哈希文件：{exc}") from exc
+    digest = verify_sha256(zip_path, manifest)
+    try:
+        signature, _ = _read(base + ".sig", engine)
+    except Exception as exc:
+        raise ValueError(f"发布缺少签名文件：{exc}") from exc
+    verify_signature(manifest, signature)
+    return digest, source
+
+
+# ---------------------------------------------------------------- 检查
 
 
 def _fetch_json(url: str, engine: Any) -> dict:
-    request = urllib.request.Request(_mirror(engine, url), headers={
-        "Accept": "application/vnd.github+json",
-        "User-Agent": _USER_AGENT,
-    })
-    with _opener(engine).open(request, timeout=_HTTP_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    data, _source = _read(url, engine, timeout=_CHECK_TIMEOUT)
+    return json.loads(data.decode("utf-8"))
 
 
 def check(engine: Any, params: dict) -> dict:
@@ -90,6 +216,8 @@ def check(engine: Any, params: dict) -> dict:
             "name": str(asset.get("name") or ""),
             "size": int(asset.get("size") or 0),
             "url": str(asset.get("browser_download_url") or ""),
+            # 新版本 release API 会给 sha256，留着做第二道对照。
+            "digest": str(asset.get("digest") or ""),
         },
     }
     _LAST.clear()
@@ -97,41 +225,78 @@ def check(engine: Any, params: dict) -> dict:
     return info
 
 
+# ---------------------------------------------------------------- 下载
+
+
+def _stream(url: str, engine: Any, target: Path, total: int) -> str:
+    errors: list[str] = []
+    for label, opener, source_url in _sources(url, engine):
+        received = 0
+        last_emit, last_size = 0.0, 0
+        try:
+            with opener.open(_request(source_url),
+                             timeout=_DOWNLOAD_TIMEOUT) as resp, \
+                    open(target, "wb") as out:
+                _emit({"stage": "download", "received": 0, "total": total,
+                       "source": label})
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    received += len(chunk)
+                    now = time.monotonic()
+                    if (received - last_size >= _PROGRESS_STEP
+                            and now - last_emit >= _PROGRESS_GAP):
+                        last_emit, last_size = now, received
+                        _emit({"stage": "download", "received": received,
+                               "total": total, "source": label})
+            return label
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            target.unlink(missing_ok=True)
+    raise RuntimeError("；".join(errors) or "没有可用的下载线路")
+
+
 def download(engine: Any, params: dict) -> dict:
-    """把检查结果里的安装包下到临时目录；进度靠界面那颗「下载中」转圈表示。"""
-    info = _LAST
-    asset = info.get("asset") or {}
+    """下载并校验安装包；进度走 `update` 事件，界面照 received/total 画。"""
+    asset = (_LAST.get("asset") or {})
     url = str(asset.get("url") or "")
     name = str(asset.get("name") or "")
-    if not info.get("has_update"):
+    total = int(asset.get("size") or 0)
+    if not _LAST.get("has_update"):
         return {"ok": False, "error": "当前已是最新版本"}
     if not url or not name:
         return {"ok": False, "error": "最新版本没有 Windows 安装包"}
     target = _update_dir() / Path(name).name
     partial = target.with_suffix(target.suffix + ".part")
+    partial.unlink(missing_ok=True)
     try:
-        request = urllib.request.Request(_mirror(engine, url), headers={
-            "User-Agent": _USER_AGENT,
-        })
-        with _opener(engine).open(request,
-                                  timeout=_DOWNLOAD_TIMEOUT) as resp, \
-                open(partial, "wb") as out:
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                out.write(chunk)
-        size = partial.stat().st_size
-        expected = int(asset.get("size") or 0)
-        if expected and size != expected:
-            partial.unlink(missing_ok=True)
-            return {"ok": False,
-                    "error": f"安装包不完整（{size}/{expected} 字节），请重试"}
-        partial.replace(target)
+        source = _stream(url, engine, partial, total)
+    except Exception as exc:
+        _emit({"stage": "error", "error": str(exc)})
+        return {"ok": False, "error": f"下载失败：{exc}"}
+    size = partial.stat().st_size
+    if total and size != total:
+        partial.unlink(missing_ok=True)
+        _emit({"stage": "error", "error": "安装包不完整"})
+        return {"ok": False,
+                "error": f"安装包不完整（{size}/{total} 字节），请重试"}
+    try:
+        digest, sha_source = _verify_download(partial, engine)
     except Exception as exc:
         partial.unlink(missing_ok=True)
-        return {"ok": False, "error": f"下载失败：{exc}"}
-    return {"ok": True, "path": str(target), "size": size}
+        _emit({"stage": "error", "error": str(exc)})
+        return {"ok": False, "error": str(exc)}
+    partial.replace(target)
+    _emit({"stage": "done", "received": size, "total": size,
+           "source": source, "sha256": digest})
+    return {"ok": True, "path": str(target), "size": size,
+            "sha256": digest, "source": source, "verified": True,
+            "manifest_source": sha_source}
+
+
+# ---------------------------------------------------------------- 安装
 
 
 def _script(app_dir: Path, zip_path: Path, pid: int, log_path: Path) -> str:
@@ -176,14 +341,14 @@ def _script(app_dir: Path, zip_path: Path, pid: int, log_path: Path) -> str:
 
 def _write_script(text: str, path: Path) -> None:
     # PowerShell 5.1 按当前 ANSI 读 .ps1；带 BOM 的 UTF-8 才能保住中文路径。
-    path.write_text("﻿" + text, encoding="utf-8")
+    path.write_text("\ufeff" + text, encoding="utf-8")
 
 
 def apply(engine: Any, params: dict) -> dict:
     """起一个和本进程无关的 PowerShell：等外壳退出 → 解压覆盖 → 重新启动。
 
     只替换文件、不删目录：config.json / config/ / modules/ 是用户数据，
-    解压包里本来也不含它们。
+    解压包里本来也不含它们。动手前再验一次哈希与签名，防临时目录被掉包。
     """
     if not getattr(sys, "frozen", False):
         return {"ok": False, "error": "源码运行不支持自动更新，请 git pull 后重启"}
@@ -200,6 +365,10 @@ def apply(engine: Any, params: dict) -> dict:
         inside = False
     if not inside or not zip_path.is_file() or zip_path.suffix != ".zip":
         return {"ok": False, "error": "安装包路径不对，请重新下载"}
+    try:
+        digest, _ = _verify_download(zip_path, engine)
+    except Exception as exc:
+        return {"ok": False, "error": f"安装前校验失败：{exc}"}
     pid = os.getpid()
     try:
         parent = os.getppid()
@@ -230,7 +399,8 @@ def apply(engine: Any, params: dict) -> dict:
         )
     except Exception as exc:
         return {"ok": False, "error": f"启动更新脚本失败：{exc}"}
-    return {"ok": True, "restart": True, "path": str(zip_path)}
+    return {"ok": True, "restart": True, "path": str(zip_path),
+            "sha256": digest}
 
 
 UPDATE_METHODS = {
