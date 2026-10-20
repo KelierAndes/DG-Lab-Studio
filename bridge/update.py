@@ -147,6 +147,10 @@ def _script(app_dir: Path, zip_path: Path, pid: int) -> str:
         f"$app = {app}; $zip = {zip_}; $tmp = {tmp};"
         f"while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) "
         "{ Start-Sleep -Milliseconds 400 };"
+        # 侧车是外壳的子进程，外壳退出后它还要收尾；两个都退干净再动文件。
+        "while (Get-Process -Name 'DGStudio-bridge' -ErrorAction SilentlyContinue) "
+        "{ Start-Sleep -Milliseconds 300 };"
+        "Start-Sleep -Milliseconds 400;"
         "if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force };"
         "try {"
         "  Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force;"
