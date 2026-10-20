@@ -306,6 +306,7 @@ def _stream(url: str, engine: Any, target: Path, total: int) -> str:
     for label, opener, source_url in _sources(url, engine):
         received = 0
         last_emit, last_size = 0.0, 0
+        started = time.monotonic()
         try:
             with opener.open(_request(source_url),
                              timeout=_DOWNLOAD_TIMEOUT) as resp, \
@@ -319,6 +320,12 @@ def _stream(url: str, engine: Any, target: Path, total: int) -> str:
                     out.write(chunk)
                     received += len(chunk)
                     now = time.monotonic()
+                    # 线路「能连上但龟速」时不能一直等：十几秒还没跑到 64 KB/s
+                    # 就换下一跳（直连被限速是常态，镜像通常快得多）。
+                    elapsed = now - started
+                    if elapsed > 12 and received / elapsed < 64 * 1024:
+                        raise RuntimeError(f"速度过慢（{received // 1024} KB / "
+                                           f"{elapsed:.0f} s），换下一跳")
                     if (received - last_size >= _PROGRESS_STEP
                             and now - last_emit >= _PROGRESS_GAP):
                         last_emit, last_size = now, received
