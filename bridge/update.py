@@ -134,7 +134,7 @@ def download(engine: Any, params: dict) -> dict:
     return {"ok": True, "path": str(target), "size": size}
 
 
-def _script(app_dir: Path, zip_path: Path, pid: int) -> str:
+def _script(app_dir: Path, zip_path: Path, pid: int, log_path: Path) -> str:
     def q(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
 
@@ -142,27 +142,41 @@ def _script(app_dir: Path, zip_path: Path, pid: int) -> str:
     zip_ = q(str(zip_path))
     tmp = q(str(app_dir / ".update_tmp"))
     exe = q(str(app_dir / "DGStudio.exe"))
+    log = q(str(log_path))
     return (
         "$ErrorActionPreference = 'Stop';"
-        f"$app = {app}; $zip = {zip_}; $tmp = {tmp};"
+        f"$app = {app}; $zip = {zip_}; $tmp = {tmp}; $log = {log};"
+        "function Note($text) { Add-Content -LiteralPath $log -Value $text };"
+        'Note ("start " + (Get-Date -Format o));'
         f"while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) "
         "{ Start-Sleep -Milliseconds 400 };"
         # 侧车是外壳的子进程，外壳退出后它还要收尾；两个都退干净再动文件。
         "while (Get-Process -Name 'DGStudio-bridge' -ErrorAction SilentlyContinue) "
         "{ Start-Sleep -Milliseconds 300 };"
         "Start-Sleep -Milliseconds 400;"
-        "if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force };"
         "try {"
+        "  if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force };"
         "  Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force;"
-        "  Copy-Item -Path (Join-Path $tmp '*') -Destination $app "
+        # 发布 zip 的根目录是 DGStudio/，直接拷 $tmp 会套出一层 DGStudio\DGStudio。
+        "  $src = Join-Path $tmp 'DGStudio';"
+        "  if (-not (Test-Path $src)) { $src = $tmp };"
+        "  Copy-Item -Path (Join-Path $src '*') -Destination $app "
         "    -Recurse -Force;"
+        "  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue;"
+        '  Note "copied";'
         "} catch {"
+        '  Note ("failed: " + $_.Exception.Message);'
         f"  Start-Process {exe} -ErrorAction SilentlyContinue;"
         "  exit 1"
         "}"
-        "Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue;"
-        f"Start-Process {exe}"
+        f"Start-Process {exe};"
+        'Note "restarted";'
     )
+
+
+def _write_script(text: str, path: Path) -> None:
+    # PowerShell 5.1 按当前 ANSI 读 .ps1；带 BOM 的 UTF-8 才能保住中文路径。
+    path.write_text("﻿" + text, encoding="utf-8")
 
 
 def apply(engine: Any, params: dict) -> dict:
@@ -193,7 +207,14 @@ def apply(engine: Any, params: dict) -> dict:
         parent = 0
     if parent and parent != pid:
         pid = parent
-    script = _script(app_dir, zip_path, pid)
+    work = _update_dir()
+    log_path = work / "update.log"
+    log_path.unlink(missing_ok=True)
+    script_path = work / "update.ps1"
+    try:
+        _write_script(_script(app_dir, zip_path, pid, log_path), script_path)
+    except Exception as exc:
+        return {"ok": False, "error": f"写入更新脚本失败：{exc}"}
     flags = 0
     if sys.platform == "win32":
         flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
@@ -201,7 +222,7 @@ def apply(engine: Any, params: dict) -> dict:
     try:
         subprocess.Popen(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-Command", script],
+             "-WindowStyle", "Hidden", "-File", str(script_path)],
             close_fds=True, creationflags=flags,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
