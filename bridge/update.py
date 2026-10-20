@@ -217,8 +217,9 @@ def apply(engine: Any, params: dict) -> dict:
         return {"ok": False, "error": f"写入更新脚本失败：{exc}"}
     flags = 0
     if sys.platform == "win32":
-        flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
-                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        # 只隐藏窗口。DETACHED_PROCESS 会让 powershell.exe 起不来（实测：进程
+        # 建出来立刻退，脚本一行都不执行），CREATE_NO_WINDOW 才能正常跑。
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         subprocess.Popen(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
