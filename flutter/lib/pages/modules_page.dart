@@ -260,7 +260,8 @@ class ModulesPage extends StatelessWidget {
                         trailing: _MarketButton(
                           engine: engine,
                           id: '${m['id']}',
-                          installed: engine.modules.any((x) => x.id == m['id']),
+                          installed: m['installed'] == true,
+                          update: m['update'] == true,
                         ),
                       ),
                     if (engine.marketLoading)
@@ -493,14 +494,19 @@ class _MarketButton extends StatelessWidget {
     required this.engine,
     required this.id,
     required this.installed,
+    required this.update,
   });
 
   final StudioEngine engine;
   final String id;
   final bool installed;
 
+  /// 装着的版本比市场里旧才算「更新」：同版本再给一颗按钮，点下去只是重装一遍。
+  final bool update;
+
   @override
   Widget build(BuildContext context) {
+    final t = AppScope.of(context);
     if (engine.isBusy(id)) {
       return const SizedBox(
         width: 14,
@@ -508,14 +514,23 @@ class _MarketButton extends StatelessWidget {
         child: CircularProgressIndicator(strokeWidth: 2),
       );
     }
+    if (update) {
+      return GhostButton(
+        key: ValueKey('market-btn-$id'),
+        label: '更新',
+        dense: true,
+        active: true,
+        onTap: () => engine.runModuleTask(id, 'modules.update'),
+      );
+    }
+    if (installed) {
+      return TinyLabel('已安装', color: t.textTertiary, size: 9);
+    }
     return GhostButton(
       key: ValueKey('market-btn-$id'),
-      label: installed ? '更新' : '安装',
+      label: '安装',
       dense: true,
-      onTap: () => engine.runModuleTask(
-        id,
-        installed ? 'modules.update' : 'market.install',
-      ),
+      onTap: () => engine.runModuleTask(id, 'market.install'),
     );
   }
 }

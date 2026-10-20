@@ -341,6 +341,8 @@ class MockEngineTransport implements EngineTransport {
         final on = params?['enabled'] == true;
         return _setModuleState('${params?['module_id'] ?? ''}',
             enabled: on, loaded: on, running: on);
+      case 'market.fetch':
+        return _marketRows();
       case 'engine.config_get':
         return _config();
       case 'engine.config_set':
@@ -1651,6 +1653,50 @@ class MockEngineTransport implements EngineTransport {
 
   /// 卡片目录的版本：测试里加一，验证事件流页会因为目录换代而整份重取。
   int catalogRev = 1;
+
+  /// 演示市场：同版本已装的、有新版可更的、没装过的各一条。
+  /// 「更新」只在市场版本比装着的版本新时出现（比较按数字段，不是字符串）。
+  List<Map<String, Object?>> _marketRows() {
+    final installed = {
+      for (final m in _modules) '${m['id']}': '${m['version']}',
+    };
+    Map<String, Object?> row(String id, String name, String version,
+        String description) {
+      final current = installed[id];
+      return {
+        'id': id,
+        'name': name,
+        'version': version,
+        'description': description,
+        'installed': current != null,
+        'update': current != null &&
+            _compareVersions(_versionKey(version), _versionKey(current)) > 0,
+      };
+    }
+
+    return [
+      row('osc_bridge', 'OSC 桥', installed['osc_bridge'] ?? '1.2.0',
+          '与 Resonate/OSC 程序互通强度与温度'),
+      row('vision_link', '视觉联动', '0.5.0', '从屏幕取色与姿态事件'),
+      row('sound_link', '声音联动', installed['sound_link'] ?? '0.9.3',
+          '按音量的低频包络驱动强度'),
+      row('demo_module', '演示模块', '0.1.0', '市场里还没装过的模块'),
+    ];
+  }
+
+  static List<int> _versionKey(String version) => [
+    for (final part in version.split('.'))
+      int.tryParse(part.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0,
+  ];
+
+  static int _compareVersions(List<int> a, List<int> b) {
+    for (var i = 0; i < (a.length > b.length ? a.length : b.length); i++) {
+      final x = i < a.length ? a[i] : 0;
+      final y = i < b.length ? b[i] : 0;
+      if (x != y) return x - y;
+    }
+    return 0;
+  }
 
   /// 设置页「本地中继」开关的假状态。
   final Map<String, bool> _relayLocal = {};

@@ -257,3 +257,42 @@ def _rmtree(path: str) -> None:
 
 if __name__ == "__main__":
     unittest.main()
+
+class MarketUpdateFlagTests(unittest.TestCase):
+    """市场清单的「更新」只在市场版本比装着的版本新时出现。"""
+
+    def _rows(self, installed, entries):
+        import asyncio
+        from types import SimpleNamespace
+
+        import bridge.server as server
+
+        store = SimpleNamespace(fetch_market=lambda force=False: entries)
+        modules = SimpleNamespace(store=store, list_modules=lambda: installed)
+        engine = SimpleNamespace(modules=modules)
+        return asyncio.run(server._market_fetch(engine, {}))
+
+    def test_update_only_when_the_market_version_is_newer(self):
+        rows = self._rows(
+            [{"id": "osc_bridge", "version": "1.21.0"},
+             {"id": "vision_link", "version": "0.4.1"}],
+            [{"id": "osc_bridge", "name": "OSC", "version": "1.21.0"},
+             {"id": "vision_link", "name": "视觉", "version": "0.4.2"},
+             {"id": "sound_link", "name": "音频", "version": "0.5.3"}])
+        by = {r["id"]: r for r in rows}
+        self.assertEqual((by["osc_bridge"]["installed"],
+                          by["osc_bridge"]["update"]), (True, False))
+        self.assertEqual((by["vision_link"]["installed"],
+                          by["vision_link"]["update"]), (True, True))
+        self.assertEqual((by["sound_link"]["installed"],
+                          by["sound_link"]["update"]), (False, False))
+
+    def test_versions_compare_by_number_not_by_string(self):
+        # 0.10.0 比 0.9.0 新；按字符串比会反过来，用户就永远等不到更新。
+        newer = self._rows([{"id": "x", "version": "0.9.0"}],
+                            [{"id": "x", "version": "0.10.0"}])
+        self.assertTrue(newer[0]["update"])
+        # 装的是开发版（比市场里的新）不该提示更新。
+        dev = self._rows([{"id": "y", "version": "2.0.0"}],
+                         [{"id": "y", "version": "1.9.9"}])
+        self.assertFalse(dev[0]["update"])

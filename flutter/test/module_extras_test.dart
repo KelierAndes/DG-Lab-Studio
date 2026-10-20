@@ -254,6 +254,38 @@ void main() {
         reason: '启用后设置项要回来');
   });
 
+  testWidgets('市场行只在版本真的变了时给「更新」', (tester) async {
+    final (shell, transport) = await bootModule(tester, 'osc_bridge');
+    await shell.engine.fetchMarket();
+    await tester.pump(const Duration(milliseconds: 260));
+    await tester.pump();
+
+    Finder inRow(String id, String text) => find.descendant(
+        of: find.byKey(ValueKey('market-$id')), matching: find.text(text));
+
+    // 装的就是市场这一版：不给按钮，也别写「更新」。
+    expect(inRow('osc_bridge', '已安装'), findsOneWidget);
+    expect(find.byKey(const ValueKey('market-btn-osc_bridge')), findsNothing);
+
+    // 没装过的仍然是「安装」。
+    expect(inRow('demo_module', '安装'), findsOneWidget);
+
+    // 市场有新版本：这才出现「更新」，点下去走 modules.update。
+    final updateBtn = find.byKey(const ValueKey('market-btn-vision_link'));
+    expect(updateBtn, findsOneWidget);
+    expect(inRow('vision_link', '更新'), findsOneWidget);
+    await tester.ensureVisible(updateBtn);
+    await tester.pump();
+    await tester.tap(updateBtn);
+    await tester.pump(const Duration(milliseconds: 320));
+    expect(
+      transport.calls.any((c) =>
+          c.$1 == 'modules.update' && c.$2['module_id'] == 'vision_link'),
+      isTrue,
+    );
+
+  });
+
   testWidgets('没有依赖声明的模块不占地方', (tester) async {
     await bootModule(tester, 'osc_bridge');
     expect(find.text('游戏模组'), findsNothing);

@@ -31,6 +31,7 @@ from bridge.flow import FLOW_METHODS
 from bridge.settings import SETTINGS_METHODS, settings_payload
 from dglab.state import EngineState
 from dglab.version import APP_VERSION
+from module_store import version_key
 from dglab.logs import classify_log
 
 BRIDGE_VERSION = 1
@@ -273,20 +274,37 @@ def _config_set(engine: Engine, params: dict):
     return config_payload(engine)
 
 
+def _market_rows(engine: Engine, entries: list[dict]) -> list[dict]:
+    """市场清单补两列：装没装、要不要更新。
+
+    版本比较只在引擎侧做一次（`version_key` 按数字段比，0.10.0 才比 0.9.0 新）；
+    界面照着布尔值画按钮，别让前端再猜一遍。装的是同一版就不该出现「更新」。
+    """
+    installed = {str(m.get("id") or ""): str(m.get("version") or "")
+                 for m in engine.modules.list_modules()}
+    rows = []
+    for e in entries:
+        mid = str(e.get("id") or "")
+        version = str(e.get("version") or "")
+        current = installed.get(mid)
+        rows.append({
+            "id": mid,
+            "name": e.get("name") or mid,
+            "version": version,
+            "description": str(e.get("description") or ""),
+            "installed": current is not None,
+            "update": current is not None
+            and version_key(version) > version_key(current),
+        })
+    return rows
+
+
 async def _market_fetch(engine: Engine, params: dict):
     # 取清单是阻塞的网络活，放到线程里，别把引擎循环卡住。
     entries = await asyncio.to_thread(
         engine.modules.store.fetch_market, force=bool(params.get("force"))
     )
-    return [
-        {
-            "id": e.get("id", ""),
-            "name": e.get("name") or e.get("id", ""),
-            "version": str(e.get("version", "")),
-            "description": str(e.get("description", "")),
-        }
-        for e in entries
-    ]
+    return _market_rows(engine, entries)
 
 
 async def _modules_enabled(engine: Engine, params: dict):

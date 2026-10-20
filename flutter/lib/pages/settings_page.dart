@@ -307,7 +307,7 @@ class SettingsPage extends StatelessWidget {
                             ),
                             const SizedBox(width: 8),
                             StatusChip(
-                              text: 'v${version['app'] ?? '0.4.0'}',
+                              text: 'v${version['app'] ?? '0.4.1'}',
                               tone: 1,
                             ),
                           ],
