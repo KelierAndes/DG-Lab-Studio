@@ -6,7 +6,9 @@ from collections import deque
 
 
 class WaveMonitor:
-    def __init__(self, maxlen: int = 160):
+    #: v4 一次批 10 帧、A/B 两条通道各自交错，5 秒窗口里能有 250 份样本；
+    #: 容量按 160 给的话最老的几帧会被挤掉，画出来就是波形缺一段。
+    def __init__(self, maxlen: int = 400):
         self.samples: deque[tuple[float, tuple, tuple]] = deque(maxlen=maxlen)
         self._lock = threading.Lock()
 

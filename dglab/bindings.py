@@ -10,9 +10,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 
-__all__ = ["bindings_dir", "load_binding_profiles", "save_binding_profiles"]
+__all__ = ["bindings_dir", "load_binding_profiles", "save_binding_profiles",
+           "OVC_BUTTON_BITS", "BUTTON_ACTIONS", "KEY_BINDING_ACTION",
+           "button_actions", "button_action_labels"]
 
 _INDEX_FILE = "index.json"
 _FILENAME_BAD = re.compile(r'[\\/:*?"<>|\r\n\t]+')
@@ -38,18 +41,25 @@ def _read_json(target: str):
 
 def _write_json(target: str, payload) -> bool:
     os.makedirs(os.path.dirname(target), exist_ok=True)
-    tmp = target + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-        os.replace(tmp, target)
-        return True
-    except OSError:
+    # 临时文件带线程号：两个线程同时存同一份配置时不会互相踩掉 .tmp。
+    tmp = f"{target}.{threading.get_ident()}.tmp"
+    # Windows 上刚写的文件会被杀软 / 索引器短暂独占，os.replace 偶发拒绝访问，
+    # 重试几次即可；一次失败就报「保存失败」会让用户以为按钮坏了。
+    for attempt in range(5):
         try:
-            os.remove(tmp)
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+            os.replace(tmp, target)
+            return True
         except OSError:
-            pass
-        return False
+            if not os.path.exists(tmp):
+                continue
+            time.sleep(0.05 * (attempt + 1))
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    return False
 
 
 def load_binding_profiles(directory: str | None = None
@@ -114,3 +124,47 @@ def save_binding_profiles(active: str, profiles: dict[str, dict[str, str]],
                      {"version": 1, "active": str(active),
                       "order": list(profiles)}) and ok
     return ok
+
+
+# ------------------------------------------------------- 按键与动作目录
+#
+# 这些是设备语义（负鼠的 11 个按键位、内置动作），旧界面把它们写在 ui/live.py 里，
+# 桥也要用，所以搬到引擎这一层；界面只负责画。
+
+OVC_BUTTON_BITS = [
+    (0, "SEL_1"), (1, "SEL_2"), (2, "HOME"),
+    (8, "Up"), (9, "Down"), (10, "Left"), (11, "Right"),
+    (12, "B"), (13, "A"), (14, "G"), (15, "D"),
+]
+
+BUTTON_ACTIONS = [
+    ("none", "无"),
+    ("a_strength_up", "A 通道强度 +10"), ("a_strength_down", "A 通道强度 -10"),
+    ("a_strength_zero", "A 通道强度 归0"),
+    ("a_wave_up", "A 切换上一个波形"), ("a_wave_down", "A 切换下一个波形"),
+    ("b_strength_up", "B 通道强度 +10"), ("b_strength_down", "B 通道强度 -10"),
+    ("b_strength_zero", "B 通道强度 归0"),
+    ("b_wave_up", "B 切换上一个波形"), ("b_wave_down", "B 切换下一个波形"),
+    ("fire", "持续开火 (按住，双通道)"),
+    ("fire_a", "持续开火 A (按住，仅 A 通道)"),
+    ("fire_b", "持续开火 B (按住，仅 B 通道)"),
+    ("estop", "急停"),
+]
+
+KEY_BINDING_ACTION = ("key", "模拟键盘按键…")
+
+
+def button_actions(engine=None) -> list[tuple[str, str]]:
+    """内置动作 + 键盘注入 + 模块注册的动作（模块没起来就只有前两类）。"""
+    items = list(BUTTON_ACTIONS)
+    items.append(KEY_BINDING_ACTION)
+    try:
+        for action in engine.modules.button_actions():
+            items.append((action.key, action.label))
+    except Exception:
+        pass
+    return items
+
+
+def button_action_labels(engine=None) -> dict[str, str]:
+    return dict(button_actions(engine))

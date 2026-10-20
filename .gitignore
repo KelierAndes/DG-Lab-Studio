@@ -9,6 +9,9 @@ __pycache__/
 # PyInstaller 中间目录与构建产物（产物经 GitHub Release 分发 zip，不入库）
 build/
 dist/
+.dart_tool/
+.flutter-plugins-dependencies
+flutter/windows/flutter/ephemeral/
 
 # ===== 本地配置与日志（首次运行自动生成，含个人设备/端口设置）=====
 config.json
@@ -25,6 +28,15 @@ UI待办.txt
 # ===== 参考资料（调查脚本与运行时备份，不随项目分发）=====
 # 注：dglab-websocket-server / dglab-websocket-simple 已改为 git submodule，不在此忽略
 _research/
+
+# ===== 外置联动模块：各自独立仓库（dgstudio-modules-<id>），只有内置 config_init 入库 =====
+modules/*
+!modules/__init__.py
+!modules/config_init/
+
+# ===== 开发期临时截图与个人记忆导出 =====
+.tmp_show/
+memory-export.md
 
 # ===== 联动模块的运行时附属物（依赖装到模块私有目录；下载临时区/删除残留）=====
 modules/*/_deps/

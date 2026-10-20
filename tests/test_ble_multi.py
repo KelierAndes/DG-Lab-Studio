@@ -7,8 +7,7 @@ import unittest
 import unittest.mock
 
 from dglab.ble import BleClient, V3_NOTIFY
-from dglab.state import EngineState, Slot, StateEvents, family_of
-from dglab.waves import CONTINUOUS, PULSE_STREAM, SILENT
+from dglab.state import StateEvents, family_of
 
 
 class FakeBleakClient:
@@ -182,127 +181,7 @@ class BleMultiDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(self.ble.state.slots["addr-bmtr"].pressure, 17.04)
 
 
-class OscProbeCardTests(unittest.TestCase):
-    def test_probe_card_states(self):
-        import time as _time
-
-        from ui import live
-
-        class FakeOsc:
-            _running = True
-            last_rx = None
-            rx_count = 0
-
-        class FakeEngine:
-            config = {"osc": {"in_port": 9001}}
-            osc = None
-
-        engine = FakeEngine()
-        card = live.osc_probe_card(engine)
-        self.assertEqual(card["value"], "已停止")
-        self.assertEqual(len(card["detail"]), 2)
-
-        osc = FakeOsc()
-        engine.osc = osc
-        card = live.osc_probe_card(engine)
-        self.assertEqual(card["value"], "无数据")
-        self.assertIn("9001", card["detail"][0])
-
-        osc.last_rx = _time.monotonic() - 2.0
-        osc.rx_count = 7
-        card = live.osc_probe_card(engine)
-        self.assertEqual(card["value"], "已连接")
-        self.assertIn("7", card["detail"][0])
-
-        osc.last_rx = _time.monotonic() - 120.0
-        card = live.osc_probe_card(engine)
-        self.assertEqual(card["value"], "无数据")
-
-
-class ChartRenderTests(unittest.TestCase):
-    def test_render_wave_live_png(self):
-        import time as _time
-
-        from ui import charts
-
-        now = _time.monotonic()
-        samples = [(now - i * 0.1, (10, 20, 30, 40), (50, 60, 70, 80))
-                   for i in range(50)]
-        for dark in (False, True):
-            png = charts.render_wave_live(samples, dark=dark)
-            self.assertEqual(png[:8],
-                             bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
-            self.assertTrue(len(png) > 1000)
-
-    def test_render_wave_live_empty(self):
-        from ui import charts
-
-        png = charts.render_wave_live([], dark=True)
-        self.assertEqual(png[:8],
-                         bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
-
-
-class OvcRoundingTests(unittest.TestCase):
-    def test_clamp_ovc_strength(self):
-        from ui import live
-
-        self.assertEqual(live.clamp_ovc_strength(15), 20)
-        self.assertEqual(live.clamp_ovc_strength(24), 20)
-        self.assertEqual(live.clamp_ovc_strength(25), 30)
-        self.assertEqual(live.clamp_ovc_strength(4), 10)
-        self.assertEqual(live.clamp_ovc_strength(205), 200)
-        self.assertEqual(live.clamp_ovc_strength(0, allow_zero=True), 0)
-        self.assertEqual(live.clamp_ovc_strength(-3, allow_zero=True), 0)
-        self.assertEqual(live.clamp_ovc_strength(0), 10)
-
-
-class LiveDataTests(unittest.TestCase):
-    def test_classify_log_levels(self):
-        from ui import live
-
-        self.assertEqual(live.classify_log("连接失败: timeout"), "error")
-        self.assertEqual(live.classify_log("急停异常 1006"), "error")
-        self.assertEqual(live.classify_log("心跳超时，重试 1/3"), "warn")
-        self.assertEqual(live.classify_log("安全限幅触发：B 通道强度下降"), "warn")
-        self.assertEqual(live.classify_log('<< {"type":"ping"}'), "debug")
-        self.assertEqual(live.classify_log("监听已启动 0.0.0.0:9999"), "info")
-
-    def test_output_row_percent(self):
-        from ui import live
-
-        slot = Slot(slot_id="s", name="t", type="47L121000",
-                    strength={"A": 100, "B": 0},
-                    strength_limit={"A": 200, "B": 200})
-        row = live.output_row(slot, "A")
-        self.assertEqual((row["value"], row["limit"], row["percent"]),
-                         (100, 200, 50.0))
-
-    def test_osc_value_rows_shapes(self):
-        from ui import live
-
-        state = EngineState(backend="ble", connected=True)
-        state.slots["a"] = Slot(slot_id="a", type="COYOTE_1",
-                                strength={"A": 1, "B": 2}, battery=50)
-        state.slots["b"] = Slot(slot_id="b", type="BMTR_1",
-                                pressure=30.0, edge_state=2)
-        rows = live.osc_value_rows(state)
-        addrs = [r["address"] for r in rows]
-        self.assertIn("…COYOTEStrengthA", addrs)
-        self.assertIn("…BMTRPressure", addrs)
-        pressure = next(r for r in rows if r["address"] == "…BMTRPressure")
-        self.assertEqual(pressure["percent"], 50)
-
-    def test_wave_items_shapes(self):
-        from ui import live
-
-        coyote = live.wave_items("COYOTE")
-        ovc = live.wave_items("OVC")
-        self.assertEqual(coyote[0][1], SILENT)
-        self.assertEqual(ovc[0][1], SILENT)
-        self.assertEqual(coyote[-1][1], PULSE_STREAM)
-        self.assertEqual(coyote[-2][1], CONTINUOUS)
-        self.assertGreater(len(coyote), len(ovc))
-
+class FamilyHelperTests(unittest.TestCase):
     def test_family_of_helpers(self):
         self.assertEqual(family_of("OVC_1"), "OVC")
         self.assertEqual(family_of("BMTR_1"), "BMTR")

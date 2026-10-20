@@ -2,6 +2,7 @@
 META = {
     "id": "config_init",
     "name": "初始化配置",
+    "short": "CFG",
     "version": "0.1.0",
     "description": "核心模块：启动时按模块声明自动装载配置文件；"
                    "支持保存到文件、从指定文件载入、导出全部配置。",
@@ -98,7 +99,8 @@ class ConfigInitModule(ModuleBase):
             applied += 1
         manager._settings_cache.clear()
         manager.ensure_all_configs()
-        manager._modules_state = _reload_modules_state(manager)
+        # 这个助手自己负责写回 manager，别再拿它的返回值赋值（它返回 None）。
+        _reload_modules_state(manager)
         return applied
 
     async def restart_running(self) -> list[str]:

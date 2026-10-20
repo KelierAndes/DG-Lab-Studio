@@ -13,7 +13,7 @@ from dglab.params import core_inputs
 from dglab.state import EngineState, Slot, family_of
 from dglab.waves import wave_order
 
-MODULES = [{"id": "osc_bridge", "name": "OSC 桥接模块",
+MODULES = [{"id": "osc_bridge", "name": "OSC 桥接模块", "short": "OSC",
             "params": [{"name": "osc_strength", "label": "OSC 强度",
                         "dir": "inout"},
                        {"name": "osc_battery", "label": "OSC 电量"}]}]
@@ -40,6 +40,16 @@ class CatalogTests(unittest.TestCase):
 
     def setUp(self):
         self.catalog = _catalog()
+
+    def test_every_category_has_a_colour(self):
+        """目录里出现的每一类都得有主题色。
+
+        界面按 `cat` 取色给卡片描边与标题：漏一类（例如「临时变量」）那几张卡
+        就跟别的卡一个颜色，用户说的「分不清类型」就是这么来的。
+        """
+        missing = sorted({d["cat"] for d in self.catalog.defs.values()}
+                         - set(EF.CATEGORY_COLORS))
+        self.assertEqual(missing, [], f"这些分类没有配色: {missing}")
 
     def test_core_params_generate_cards(self):
         for spec in core_inputs():
@@ -225,13 +235,15 @@ class RuntimeTests(unittest.TestCase):
         self.core_writes: list[tuple[str, int]] = []
         self.module_writes: list[tuple[str, str, float]] = []
         self.temps: dict[str, float] = {}
+        self.logs: list[str] = []
         self.runtime = EF.FlowRuntime(
             self.catalog, self.graphs,
             read_core=lambda: dict(self.core),
             read_modules=lambda: {m: dict(s) for m, s in self.modules.items()},
             write_core=lambda key, value: self.core_writes.append((key, value)),
             write_module=lambda mid, name, value: self.module_writes.append((mid, name, value)),
-            temps=self.temps)
+            temps=self.temps,
+            log=self.logs.append)
 
     def _graph(self, page: str) -> EF.FlowGraph:
         return self.graphs[page]
@@ -280,6 +292,275 @@ class RuntimeTests(unittest.TestCase):
         graph.connect(self.catalog, const, 0, sink, 0)
         self.runtime.tick(now=0.0)
         self.assertEqual(self.core_writes, [(STRENGTH, 100)])
+
+    def test_connect_inserts_converter_instead_of_rejecting(self):
+        """异类型不再直接拒绝：中间自动插一张转换卡，两条腿都接上。"""
+        graph = self._graph(EF.PAGE_INPUT)
+        text = graph.add_node(self.catalog, "util.to_str", 0.0, 0.0)
+        sink = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 320.0, 0.0)
+        before = len(graph.nodes)
+        wire, why = graph.connect(self.catalog, text, 0, sink, 0)
+        self.assertIsNotNone(wire, why)
+        conv = [n for n in graph.nodes if n.def_key == "util.to_int"]
+        self.assertEqual(len(conv), 1, "没有自动补上「转整数」")
+        self.assertEqual(len(graph.nodes), before + 1)
+        self.assertEqual({(w.src[0], w.dst[0]) for w in graph.wires},
+                         {(text.id, conv[0].id), (conv[0].id, sink.id)})
+
+    def test_converter_for_covers_every_target_type(self):
+        by_target = {target: self.graphs[EF.PAGE_INPUT].converter_for(
+            EF.STR, target) for target in (EF.BOOL, EF.STR, EF.INT, EF.FLOAT, EF.ANY)}
+        self.assertEqual(by_target[EF.BOOL], "util.to_bool")
+        self.assertEqual(by_target[EF.STR], "util.to_str")
+        self.assertEqual(by_target[EF.INT], "util.to_int")
+        self.assertEqual(by_target[EF.FLOAT], "util.to_int")
+        self.assertEqual(by_target[EF.ANY], "", "any 本来就接得上，不该多插一张卡")
+        # 执行流是控制流，不是数据，插转换卡接不上也不该接。
+        self.assertEqual(self.graphs[EF.PAGE_INPUT].converter_for(EF.EXEC, EF.INT), "")
+        self.assertEqual(self.graphs[EF.PAGE_INPUT].converter_for(EF.INT, EF.EXEC), "")
+
+    def test_two_writes_to_one_core_key_in_a_beat_stop_dispatch(self):
+        """同一拍两条互不相干的事件流写同一个核心参数：报冲突并停止本拍派发。
+
+        撞上的那几张要一起标出来（红字 + 灰显），只报后写的那张看不出是谁在抢。
+        """
+        graph = self._graph(EF.PAGE_INPUT)
+        sinks = []
+        for y, value in ((0.0, 30.0), (200.0, 80.0)):
+            source = graph.add_node(self.catalog, "var.const_float", 0.0, y)
+            source.params["v"] = value
+            sink = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 320.0, y)
+            graph.connect(self.catalog, source, 0, sink, 0)
+            sinks.append(sink)
+        self.runtime.tick(now=0.0)
+        self.assertEqual(len(self.core_writes), 1,
+                         f"两条流在同一拍都写出去了：{self.core_writes}")
+        self.assertTrue(any("写入冲突" in msg for msg in self.runtime.errors.values()),
+                        self.runtime.errors)
+        for sink in sinks:
+            self.assertIn("写入冲突", self.runtime.errors.get(sink.id, ""),
+                          f"{sink.id} 没分到冲突那份提示")
+            self.assertIn(sink.id, self.runtime.idle, self.runtime.idle)
+
+    def test_two_cards_writing_one_value_are_not_a_conflict(self):
+        """两张卡算出同一个数：本来就会被去重，不该报冲突。"""
+        graph = self._graph(EF.PAGE_INPUT)
+        for y in (0.0, 200.0):
+            source = graph.add_node(self.catalog, "var.const_float", 0.0, y)
+            source.params["v"] = 42.0
+            sink = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 320.0, y)
+            graph.connect(self.catalog, source, 0, sink, 0)
+        self.runtime.tick(now=0.0)
+        self.assertFalse(self.runtime.errors, self.runtime.errors)
+        self.assertEqual(self.core_writes, [(STRENGTH, 42)])
+
+    def test_conflict_error_survives_beats_that_did_not_fire(self):
+        """冲突只在事件触发那一拍出现，红字要留住几拍，别在空拍上被抹掉。"""
+        graph = self._graph(EF.PAGE_INPUT)
+        driver = graph.add_node(self.catalog, "mod.period", 0.0, 0.0)
+        driver.params["period_ms"] = 10000.0
+        fan = graph.add_node(self.catalog, "flow.sequence", 200.0, 0.0)
+        graph.connect(self.catalog, driver, 0, fan, -1)
+        sinks = []
+        for leg, y in ((0, 0.0), (1, 220.0)):
+            const = graph.add_node(self.catalog, "var.const_float", 0.0, y + 300.0)
+            const.params["v"] = 20.0 + leg * 50.0
+            sink = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, y)
+            graph.connect(self.catalog, const, 0, sink, 0)
+            graph.connect(self.catalog, fan, leg, sink, -1)
+            sinks.append(sink)
+        self.runtime.tick(now=0.0)
+        fired = {k for k, v in self.runtime.errors.items() if "写入冲突" in v}
+        self.assertTrue(fired, self.runtime.errors)
+        self.assertEqual(fired, {s.id for s in sinks}, "撞上的两张都该标出来")
+        self.runtime.tick(now=0.05)
+        self.assertEqual({k for k, v in self.runtime.errors.items() if "写入冲突" in v},
+                         fired, "驱动没发的那一拍把红字抹掉了，看着就是界面在闪")
+        self.assertEqual(set(self.runtime.idle) & fired, fired,
+                         "灰显也得留住，不然空拍上卡片会自己亮回去")
+        for step in range(40):
+            self.runtime.tick(now=1.0 + step * 0.05)
+        self.assertFalse(any("写入冲突" in v for v in self.runtime.errors.values()),
+                         "错误该在几十拍内自己退掉")
+        self.assertFalse(set(self.runtime.idle) & fired,
+                         "灰显跟着红字一起退掉")
+
+    def test_repeated_errors_log_once_per_window(self):
+        """卡片上的错误每拍都算得出来，日志里同一条一个窗口只写一次。
+
+        卡片只留「无连线 / 写入冲突」这种短标签，完整那句进日志——但驱动 100 ms
+        一拍，逐拍写会把整屏刷成同一条。
+        """
+        graph = self._graph(EF.PAGE_INPUT)
+        driver = graph.add_node(self.catalog, "mod.period", 0.0, 0.0)
+        driver.params["period_ms"] = 100.0
+        fan = graph.add_node(self.catalog, "flow.sequence", 200.0, 0.0)
+        graph.connect(self.catalog, driver, 0, fan, -1)
+        for leg, y in ((0, 0.0), (1, 220.0)):
+            const = graph.add_node(self.catalog, "var.const_float", 0.0, y + 300.0)
+            const.params["v"] = 20.0 + leg * 50.0
+            sink = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, y)
+            graph.connect(self.catalog, const, 0, sink, 0)
+            graph.connect(self.catalog, fan, leg, sink, -1)
+        for step in range(40):
+            self.runtime.tick(now=step * 0.05)
+        hits = [text for text in self.logs if "写入冲突" in text]
+        self.assertEqual(len(hits), 1, self.logs)
+        self.assertIn("不同的值写", hits[0], "日志里要留完整那一句")
+        # 错误一直还在 → 不再刷；等它退掉了也不补写。
+        for step in range(40):
+            self.runtime.tick(now=3.0 + step * 0.05)
+        self.assertEqual(len([t for t in self.logs if "写入冲突" in t]), 1, self.logs)
+
+    def test_idle_note_logs_once_per_window(self):
+        """让位的写入卡每拍都算得出来「无连线」，日志同样只写一次。"""
+        graph = self._graph(EF.PAGE_INPUT)
+        driver = graph.add_node(self.catalog, "mod.period", 0.0, 0.0)
+        driver.params["period_ms"] = 10000.0
+        fired_value = graph.add_node(self.catalog, "var.const_float", 0.0, 120.0)
+        fired_value.params["v"] = 100.0
+        fired = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, 0.0)
+        graph.connect(self.catalog, fired_value, 0, fired, 0)
+        graph.connect(self.catalog, driver, 0, fired, -1)
+        holder_value = graph.add_node(self.catalog, "var.const_float", 0.0, 240.0)
+        holder_value.params["v"] = 30.0
+        holder = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, 240.0)
+        graph.connect(self.catalog, holder_value, 0, holder, 0)
+        for step in range(40):
+            self.runtime.tick(now=step * 0.05)
+        hits = [text for text in self.logs if "无连线" in text]
+        self.assertEqual(len(hits), 1, self.logs)
+        self.assertIn(holder.id, self.runtime.idle, self.runtime.idle)
+
+    def test_idle_sink_stops_writing_when_a_wired_one_owns_the_key(self):
+        """同一个参数有执行流走得到的卡在写，走不到的那张就彻底让位。
+
+        它以前每拍补写一次，驱动没发的那几拍会把值盖回去——用户看到的
+        就是「按逻辑该写 0，设备上却是 1」。
+        """
+        graph = self._graph(EF.PAGE_INPUT)
+        holder_value = graph.add_node(self.catalog, "var.const_float", 0.0, 240.0)
+        holder_value.params["v"] = 30.0
+        holder = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, 240.0)
+        graph.connect(self.catalog, holder_value, 0, holder, 0)
+        driver = graph.add_node(self.catalog, "mod.period", 0.0, 0.0)
+        driver.params["period_ms"] = 10000.0
+        fired_value = graph.add_node(self.catalog, "var.const_float", 0.0, 120.0)
+        fired_value.params["v"] = 100.0
+        fired = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, 0.0)
+        graph.connect(self.catalog, fired_value, 0, fired, 0)
+        graph.connect(self.catalog, driver, 0, fired, -1)
+        # 驱动只发一拍：后面这些空拍里，空闲那张也不许再把 30 补回去。
+        self.runtime.tick(now=0.0)
+        for step in range(6):
+            self.runtime.tick(now=0.05 + step * 0.05)
+        self.assertEqual(self.core_writes, [(STRENGTH, 100)], self.core_writes)
+        notes = [v for v in self.runtime.errors.values() if "无连线" in v]
+        self.assertTrue(notes, "空闲卡片该有一句说明为什么不写")
+        # 灰显给的是走不到的那张，接到驱动上的那张不能跟着一起灰。
+        self.assertEqual(self.runtime.idle, [holder.id], self.runtime.idle)
+
+    def test_write_behind_an_undriven_branch_is_the_idle_one(self):
+        """分支自己没接驱动时，它下面线连得齐齐的写入卡才是失效的那几张。
+
+        用户那三张负鼠开火卡：直连驱动的那张在写 0，另外两张挂在一条没人触发的
+        分支上却每拍补写 1——按「接没接执行线」判会把直连那张认错。
+        """
+        graph = self._graph(EF.PAGE_INPUT)
+        driver = graph.add_node(self.catalog, "mod.period", 0.0, 0.0)
+        driver.params["period_ms"] = 10000.0
+        live_value = graph.add_node(self.catalog, "var.const_float", 0.0, 120.0)
+        live_value.params["v"] = 0.0
+        live = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, 0.0)
+        graph.connect(self.catalog, live_value, 0, live, 0)
+        graph.connect(self.catalog, driver, 0, live, -1)
+        # 分支的执行入口空着：这一拍以及往后的每一拍都走不到它。
+        branch = graph.add_node(self.catalog, "flow.branch", 200.0, 240.0)
+        truth = graph.add_node(self.catalog, "var.const_bool", 0.0, 360.0)
+        graph.connect(self.catalog, truth, 0, branch, 0)
+        dead = []
+        for row, value in ((240.0, 30.0), (400.0, 80.0)):
+            source = graph.add_node(self.catalog, "var.const_float", 0.0, row + 300.0)
+            source.params["v"] = value
+            sink = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, row)
+            graph.connect(self.catalog, source, 0, sink, 0)
+            graph.connect(self.catalog, branch, 0, sink, -1)
+            dead.append(sink)
+        self.runtime.tick(now=0.0)
+        self.runtime.tick(now=0.05)
+        self.assertEqual(self.core_writes, [(STRENGTH, 0)], self.core_writes)
+        self.assertEqual(set(self.runtime.idle),
+                         {branch.id} | {s.id for s in dead}, self.runtime.idle)
+        self.assertNotIn(live.id, self.runtime.errors)
+        for sink in dead:
+            self.assertIn("没有执行流走到", self.runtime.errors[sink.id])
+
+    def test_wiring_an_idle_sink_into_the_flow_clears_grey_and_note(self):
+        """接上执行流以后，灰显当场收掉，卡片上的注释走完余量也没了。
+
+        红字本来只在 flow.state 那份快照里回传，界面按秒拉实时值时不带着它，
+        用户接好线还是看着那张卡写着「这张没执行流」。
+        """
+        graph = self._graph(EF.PAGE_INPUT)
+        driver = graph.add_node(self.catalog, "mod.period", 0.0, 0.0)
+        driver.params["period_ms"] = 10000.0
+        fired_value = graph.add_node(self.catalog, "var.const_float", 0.0, 120.0)
+        fired_value.params["v"] = 100.0
+        fired = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, 0.0)
+        graph.connect(self.catalog, fired_value, 0, fired, 0)
+        graph.connect(self.catalog, driver, 0, fired, -1)
+        holder_value = graph.add_node(self.catalog, "var.const_float", 0.0, 240.0)
+        holder_value.params["v"] = 30.0
+        holder = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, 240.0)
+        graph.connect(self.catalog, holder_value, 0, holder, 0)
+        self.runtime.tick(now=0.0)
+        self.assertIn(holder.id, self.runtime.idle, self.runtime.idle)
+        self.assertTrue(self.runtime.errors.get(holder.id))
+        graph.connect(self.catalog, driver, 0, holder, -1)
+        self.runtime.tick(now=0.05)
+        self.assertNotIn(holder.id, self.runtime.idle, self.runtime.idle)
+        for step in range(32):
+            self.runtime.tick(now=0.10 + step * 0.05)
+        self.assertEqual(self.runtime.errors, {}, self.runtime.errors)
+        self.assertEqual(self.core_writes, [(STRENGTH, 100)], self.core_writes)
+
+    def test_idle_sink_still_holds_a_key_nobody_drives(self):
+        """没人接执行线管的变量：空闲卡片照旧每拍保持写入（去重），也不灰显。"""
+        graph = self._graph(EF.PAGE_INPUT)
+        source = graph.add_node(self.catalog, "var.const_float", 0.0, 0.0)
+        source.params["v"] = 55.0
+        sink = graph.add_node(self.catalog, "var.temp_write", 320.0, 0.0)
+        sink.params["name"] = "holder"
+        graph.connect(self.catalog, source, 0, sink, 0)
+        self.runtime.tick(now=0.0)
+        self.runtime.tick(now=0.05)
+        self.assertEqual(self.temps.get("holder"), 55.0)
+        self.assertFalse(self.runtime.errors, self.runtime.errors)
+        self.assertEqual(self.runtime.idle, [], self.runtime.idle)
+
+    def test_branch_legs_writing_one_core_key_are_allowed(self):
+        """if 分支两条腿每拍只走一条，同一个参数被两条腿各写一次是允许的。"""
+        graph = self._graph(EF.PAGE_INPUT)
+        driver = graph.add_node(self.catalog, "mod.period", 0.0, 0.0)
+        driver.params["period_ms"] = 100.0
+        gate = graph.add_node(self.catalog, "flow.branch", 200.0, 0.0)
+        truth = graph.add_node(self.catalog, "var.const_bool", 0.0, 160.0)
+        graph.connect(self.catalog, driver, 0, gate, -1)
+        graph.connect(self.catalog, truth, 0, gate, 0)
+        sinks = []
+        for y, value in ((0.0, 30.0), (220.0, 80.0)):
+            source = graph.add_node(self.catalog, "var.const_float", 0.0, y + 300.0)
+            source.params["v"] = value
+            sink = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 460.0, y)
+            graph.connect(self.catalog, source, 0, sink, 0)
+            sinks.append(sink)
+        graph.connect(self.catalog, gate, 0, sinks[0], -1)
+        graph.connect(self.catalog, gate, 1, sinks[1], -1)
+        self.runtime.tick(now=0.0)
+        self.runtime.tick(now=0.1)
+        self.assertFalse(any("写入冲突" in msg for msg in self.runtime.errors.values()),
+                         self.runtime.errors)
+        self.assertTrue(self.core_writes, "分支两条腿一次都没写出去")
 
     def test_period_driver_fires_on_its_own_beat(self):
         graph = self._graph(EF.PAGE_INPUT)
@@ -362,6 +643,51 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.temps.get("miss"), 11.0)
         self.assertEqual(self.temps.get("hit"), 99.0)
 
+    def test_data_flow_lists_module_and_core_lines(self):
+        """概览页的探测卡：只报「模块传出 → 核心写入」与「核心传出 → 模块写入」。
+
+        中间经过的转换卡要顺着走；公式摊开后只报第一个变量、其余算进 count；
+        常数直接写核心的那条不属于模块线路，不该出现。
+        """
+        graph = self._graph(EF.PAGE_INPUT)
+        reader = graph.add_node(self.catalog,
+                                "mod.read.osc_bridge.osc_strength", 0.0, 0.0)
+        conv = graph.add_node(self.catalog, "util.to_int", 160.0, 0.0)
+        sink = graph.add_node(self.catalog, f"core.write.{STRENGTH}", 320.0, 0.0)
+        graph.connect(self.catalog, reader, 0, conv, 0)
+        graph.connect(self.catalog, conv, 0, sink, 0)
+        const = graph.add_node(self.catalog, "var.const_float", 0.0, 120.0)
+        plain = graph.add_node(self.catalog, "core.write.in_strength_b", 320.0, 120.0)
+        graph.connect(self.catalog, const, 0, plain, 0)
+        formula = graph.add_node(self.catalog, "expr.free", 0.0, 240.0)
+        formula.params["expr"] = "{osc_strength} - {osc_battery}"
+        summed = graph.add_node(self.catalog, "core.write.in_strength_b", 320.0, 240.0)
+        graph.connect(self.catalog, formula, 0, summed, 0)
+        out_graph = self._graph(EF.PAGE_OUTPUT)
+        source = out_graph.add_node(self.catalog, "core.read.COYOTE.Battery", 0.0, 0.0)
+        writer = out_graph.add_node(self.catalog,
+                                    "mod.write.osc_bridge.osc_strength", 320.0, 0.0)
+        out_graph.connect(self.catalog, source, 0, writer, 0)
+
+        rows = self.runtime.data_flow()
+        self.assertEqual([r["kind"] for r in rows], ["to_core", "to_core", "from_core"],
+                         rows)
+        first = rows[0]
+        self.assertEqual(first["coreShort"], EF.CORE_SHORT)
+        self.assertEqual(first["otherShort"], "OSC", "简写取模块声明的那一份")
+        self.assertNotIn(" · ", first["other"], "线路里只要参数名，不要「OSC · 」前缀")
+        self.assertEqual(rows[1]["count"], 2, "公式里两个模块变量：只报首项，数量给界面")
+        self.assertEqual(rows[2]["otherShort"], "OSC")
+        self.assertEqual(rows[2]["coreShort"], EF.CORE_SHORT)
+
+    def test_module_cards_use_the_declared_short(self):
+        """模块自己声明的简写直接进卡片标题；没声明的老模块仍按名字猜。"""
+        graph = self._graph(EF.PAGE_INPUT)
+        reader = graph.add_node(self.catalog,
+                                "mod.read.osc_bridge.osc_strength", 0.0, 0.0)
+        self.assertEqual(reader.title(self.catalog), "OSC · OSC 强度")
+        self.assertEqual(self.catalog.definition(reader.def_key)["short"], "OSC")
+
     def test_module_cards_read_and_write_module_side(self):
         input_graph = self._graph(EF.PAGE_INPUT)
         reader = input_graph.add_node(self.catalog,
@@ -420,6 +746,9 @@ class RuntimeTests(unittest.TestCase):
                  ("lte", 5.1, 5.0, False)]
         for op, a, b, expected in table:
             graph = self._graph(EF.PAGE_INPUT)
+            # 每一组都要一张干净画布：同一个变量在一拍里被好几张卡写，
+            # 引擎现在会判成写入冲突而停止派发（这条正是新规则要抓的）。
+            graph.clear()
             node = graph.add_node(self.catalog, f"logic.{op}", 0.0, 0.0)
             node.overrides[0] = a
             node.overrides[1] = b
@@ -599,6 +928,23 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((runtime.active, runtime.graphs),
                          ("主用", runtime.profiles["主用"]))
 
+    def test_runtime_remove_profile_guardrails(self):
+        """删配置：只剩一份不能删、正在用的那份要先切走。"""
+        runtime = EF.FlowRuntime(self.catalog,
+                                 self._graphs("var.const_float", 5.0),
+                                 base_dir=self.path)
+        self.assertEqual(runtime.remove_profile(EF.DEFAULT_PROFILE),
+                         "至少要保留一份配置")
+        runtime.new_profile("演出")
+        self.assertEqual(runtime.active, "演出")
+        self.assertIn("正在使用的配置不能删除", runtime.remove_profile("演出"))
+        self.assertTrue(runtime.switch_profile(EF.DEFAULT_PROFILE))
+        self.assertEqual(runtime.remove_profile("演出"), "")
+        self.assertNotIn("演出", runtime.profile_names)
+        # 删完要落盘：文件里那份也跟着走，不然下次开机幽灵配置又回来。
+        _, loaded = EF.load_profiles(EF.profiles_dir(self.path))
+        self.assertNotIn("演出", loaded)
+
     def test_profile_modules_lists_referenced_module_ids(self):
         graphs = self._graphs("mod.read.osc_bridge.osc_strength", 1.0)
         graph = graphs[EF.PAGE_OUTPUT]
@@ -731,6 +1077,13 @@ class _FakeModules:
 
     def is_enabled(self, module_id: str) -> bool:
         return True if self.enabled is None else module_id in self.enabled
+
+    def installed(self, module_id: str) -> bool:
+        """盘上还有没有这个模块（测试里用 installed_ids 直接摆）。"""
+        ids = getattr(self, "installed_ids", None)
+        if ids is None:
+            ids = {str(m.get("id")) for m in self.metas}
+        return module_id in ids
 
     def instance(self, module_id: str):
         return self.inst if module_id == "osc_bridge" else None
@@ -889,6 +1242,46 @@ class FlowHostTests(unittest.TestCase):
         self.host.runtime.tick(now=0.0)
         self.assertEqual(node.live, [42.0])
 
+    def test_catalog_revision_moves_only_when_the_pool_changes(self):
+        """目录版本是界面「要不要整份重取」的信号：没变就别拉。"""
+        self.host.refresh(force=True)
+        revision = self.host.catalog.revision
+        self.assertFalse(self.host.refresh())
+        self.assertEqual(self.host.catalog.revision, revision,
+                         "签名没变就不该重建目录，否则界面会一直重取")
+        self.engine.modules.specs = [
+            {"key": "avatar/parameters/DGLabStrengthA", "label": "OSC 可写",
+             "dir": "out"}]
+        self.assertTrue(self.host.refresh())
+        self.assertGreater(self.host.catalog.revision, revision)
+
+    def test_module_cards_come_back_after_the_device_reconnects(self):
+        """设备断开时读数卡查不到定义、画布上只剩一个 key；重连后要恢复。
+
+        这就是用户看到的那一幕：变量表已经出现 DGLab 那条，事件流上那几张
+        `mod.read ...` 卡还是空壳——目录换代了，界面却没被告知。
+        """
+        key = "mod.read.osc_bridge.avatar/parameters/DGLabStrengthA"
+        specs = [{"key": "avatar/parameters/DGLabStrengthA",
+                  "label": "OSC 可读", "dir": "in"}]
+        self.engine.modules.specs = specs
+        self.host.refresh(force=True)
+        self.assertTrue(self.host.catalog.known(key))
+        revision = self.host.catalog.revision
+
+        self.engine.modules.specs = []          # 设备断开：参数不再登记
+        self.assertTrue(self.host.refresh())
+        self.assertFalse(self.host.catalog.known(key))
+        self.assertGreater(self.host.catalog.revision, revision,
+                           "少掉一批定义也得算换了一版")
+
+        self.engine.modules.specs = specs       # 重新连上：同一批卡恢复
+        self.assertTrue(self.host.refresh())
+        read = self.host.catalog.definition(key)
+        self.assertEqual(read["op"], "mod_read")
+        self.assertTrue(read["short"], "卡片标题靠模块简写，不能是空串")
+        self.assertTrue(read["outputs"], "读数卡的输出脚要跟着回来")
+
     def test_module_signals_feed_values_and_reserved_names(self):
         """模块读数走 `bridge.engine.signals` 进事件流：这条挂接名不能改。
 
@@ -920,8 +1313,8 @@ class FlowHostTests(unittest.TestCase):
         self.assertEqual(system["DGLab/Action"]["dir"], "in")
         self.assertIn("osc_strength", system)
 
-    def test_renamable_module_rows_never_enter_the_system_section(self):
-        """OSC 那类标了 renamable 的行只进可改名栏，系统栏一行都不该有。"""
+    def test_renamable_module_rows_stay_in_the_system_section(self):
+        """OSC 那类可改名的登记行也在系统变量组：改名可改，类型与读写由模块定。"""
         self.engine.modules.specs = [
             {"key": "avatar/parameters/DGLabStrengthA", "label": "OSC 可写",
              "dir": "out", "renamable": True},
@@ -929,12 +1322,14 @@ class FlowHostTests(unittest.TestCase):
              "renamable": True}]
         self.host.refresh(force=True)
         system, user = self.host.runtime.var_table()
-        self.assertNotIn("avatar/parameters/DGLabStrengthA",
-                         {row["name"] for row in system})
-        self.assertNotIn("DGLab/Action", {row["name"] for row in system})
-        by = {row["name"]: row for row in user}
+        by = {row["name"]: row for row in system}
+        self.assertIn("avatar/parameters/DGLabStrengthA", by)
+        self.assertIn("DGLab/Action", by)
         self.assertEqual(by["avatar/parameters/DGLabStrengthA"]["dir"], "out")
         self.assertEqual(by["DGLab/Action"]["dir"], "in")
+        self.assertIs(by["avatar/parameters/DGLabStrengthA"]["renamable"], True)
+        self.assertEqual({row["name"] for row in user}, set(),
+                         "模块登记的行一律留在左栏，临时变量组不收")
 
     def test_renamable_row_wins_same_name_collision(self):
         """跨模块同名：可改名行不能被别模块的只读同名行顶进系统栏。"""
@@ -981,14 +1376,40 @@ class FlowHostTests(unittest.TestCase):
         names = {row["name"] for row in system} | {row["name"] for row in user}
         self.assertNotIn("ghost_var", names)
 
-    def test_renamable_rows_land_in_the_renamable_section(self):
+    def test_module_rows_land_in_the_system_section(self):
+        """设备参数进系统变量组；临时变量组只剩用户自己登记的那几个。"""
         self.engine.modules.specs = [{"key": "avatar/parameters/X",
                                       "label": "OSC 可读", "dir": "in",
                                       "renamable": True}]
         self.host.refresh(force=True)
-        system, user = self.host.runtime.var_table()
-        self.assertNotIn("avatar/parameters/X", {row["name"] for row in system})
-        self.assertIn("avatar/parameters/X", {row["name"] for row in user})
+        runtime = self.host.runtime
+        self.assertEqual(runtime.add_user_var("Combo"), "")
+        system, user = runtime.var_table()
+        self.assertIn("avatar/parameters/X", {row["name"] for row in system})
+        self.assertNotIn("avatar/parameters/X", {row["name"] for row in user})
+        self.assertEqual([row["name"] for row in user], ["Combo"])
+        runtime.remove_user_var("Combo")
+
+    def test_var_table_groups_system_rows_by_module(self):
+        """系统变量按模块聚在一起，临时变量按字母排。"""
+        self.host.refresh(force=True)
+        runtime = self.host.runtime
+        saved = runtime.declared_vars
+        runtime.declared_vars = [
+            {"name": "zeta", "mid": "b_mod", "source": "乙模块（b_mod）", "dir": "in"},
+            {"name": "alpha", "mid": "b_mod", "source": "乙模块（b_mod）", "dir": "in"},
+            {"name": "middle", "mid": "a_mod", "source": "甲模块（a_mod）", "dir": "in"},
+        ]
+        self.assertEqual(runtime.add_user_var("Zulu"), "")
+        self.assertEqual(runtime.add_user_var("apple"), "")
+        system, user = runtime.var_table()
+        self.assertEqual([row["name"] for row in system],
+                         ["middle", "alpha", "zeta"])
+        self.assertEqual([row["name"] for row in user], ["apple", "Zulu"],
+                         "大小写混排也按字母排，不能大写一堆、小写一堆")
+        runtime.remove_user_var("Zulu")
+        runtime.remove_user_var("apple")
+        runtime.declared_vars = saved
 
     def test_rename_renamable_row_goes_through_the_module(self):
         self.engine.modules.specs = [{"key": "avatar/parameters/X",
@@ -1000,7 +1421,7 @@ class FlowHostTests(unittest.TestCase):
         card = graph.add_node(self.host.catalog,
                               "mod.read.osc_bridge.avatar/parameters/X",
                               0.0, 0.0)
-        row = next(r for r in runtime.var_table()[1]
+        row = next(r for r in runtime.var_table()[0]
                    if r["name"] == "avatar/parameters/X")
         self.assertEqual(runtime.rename_var_row(row, "avatar/parameters/Y"), "")
         self.assertEqual(self.engine.modules.inst.renamed,
@@ -1102,6 +1523,23 @@ class FlowHostTests(unittest.TestCase):
         self.assertEqual(self.host.missing_modules(), ["osc_bridge"])
         self.engine.modules.enabled = {"osc_bridge"}
         self.assertEqual(self.host.missing_modules(), [])
+
+    def test_purge_keeps_cards_of_installed_but_unloaded_module(self):
+        """开机清理跑在模块登记之前时，不能把模块的读数卡当失效卡片删掉。"""
+        graph = self.host.runtime.graphs[EF.PAGE_INPUT]
+        graph.add_node(self.host.catalog,
+                       "mod.read.osc_bridge.osc_strength", 0.0, 0.0)
+        before = len(graph.nodes)
+        self.engine.modules.enabled = set()
+        self.host.refresh(force=True)
+        self.assertFalse(self.host.catalog.known("mod.read.osc_bridge.osc_strength"))
+        self.assertEqual(self.host.purge_missing_cards(), 0)
+        self.assertEqual(len(graph.nodes), before, "模块还在盘上，卡片得留着等它加载")
+
+        # 真卸载了（盘上没了）才连带删卡。
+        self.engine.modules.installed_ids = set()
+        self.assertEqual(self.host.purge_missing_cards(), 1)
+        self.assertEqual(len(graph.nodes), before - 1)
 
     def test_switch_profile_rebuilds_catalog_and_persists_active(self):
         graph = self.host.runtime.graphs[EF.PAGE_INPUT]

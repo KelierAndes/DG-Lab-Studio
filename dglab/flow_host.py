@@ -159,8 +159,9 @@ class FlowHost:
     def purge_missing_cards(self) -> int:
         """清掉画布上查不到定义的失效卡片。
 
-        模块只是没启用时保留它的卡片（重新启用就恢复）；已取消的卡片层
-        （变量对象卡）与模块已卸载的卡片直接删掉，别在画布上留一地「失效卡片」。
+        模块只要还在盘上就保留它的卡片——没启用、开机时还没加载完都算正常，
+        重新启用就恢复；真被卸载了才连带删掉。变量对象卡（取消登记的变量）
+        没有模块可依附，直接删，别在画布上留一地「失效卡片」。
         """
         dropped = 0
         for graphs in self.runtime.profiles.values():
@@ -170,7 +171,7 @@ class FlowHost:
                     if self.catalog.known(key):
                         continue
                     mid = _card_module(key)
-                    if mid and not self.engine.modules.is_enabled(mid):
+                    if mid and self.engine.modules.installed(mid):
                         continue
                     graph.remove_node(node)
                     dropped += 1
@@ -225,6 +226,7 @@ class FlowHost:
             except Exception:
                 pass
             rows.append({"id": mid, "name": str(meta.get("name") or mid),
+                         "short": str(meta.get("short") or ""),
                          "params": params})
         return rows
 
@@ -241,7 +243,7 @@ class FlowHost:
         self.runtime.declared_vars = _declared_vars(rows)
         user_vars = self.runtime.user_vars
         signature = (tuple(sorted(
-            (str(r["id"]), str(r["name"]),
+            (str(r["id"]), str(r["name"]), str(r.get("short") or ""),
              tuple(sorted(str(n) for n in _pool_names(r))))
             for r in rows)), count,
             tuple(sorted(str(row.get("name") or "") for row in user_vars)))

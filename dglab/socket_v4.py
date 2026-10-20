@@ -179,8 +179,10 @@ class SocketV4Client:
         monitor = self._monitor(sid)
         for i, frame in enumerate(frames):
             segs = list(bytes.fromhex(frame)[4:8])
-            segs_a = segs if channel == "A" else [0, 0, 0, 0]
-            segs_b = segs if channel == "B" else [0, 0, 0, 0]
+            # 另一条通道留空而不是补四个 0：补零会让 A、B 两批样本交错着落在同一时刻，
+            # 界面按帧间隔算格子宽度时算出的是「半帧」，柱子挤在一起互相盖掉。
+            segs_a = segs if channel == "A" else []
+            segs_b = segs if channel == "B" else []
             monitor.record_at(start + i * 0.1, segs_a, segs_b)
 
     async def _wave_tick(self) -> None:

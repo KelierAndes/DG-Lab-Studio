@@ -20,6 +20,10 @@ DEFAULT_REPO = {"owner": "KelierAndes", "name": "dgstudio-modules-market",
                 "branch": "main"}
 _UA = "DGStudio-ModuleStore/1.0"
 _MARKET_NAME = "market.yaml"
+#: 模块仓库常把说明文档放在仓库根上。下载时若模块目录里没有自带 README，
+#: 就把根上那份取回来落到 `modules/<id>/README.md`——详情页那颗「README」按钮
+#: 读的是模块目录里的文件。
+ROOT_DOC_NAMES = ("README.md", "README.rst", "README.txt")
 _HTTP_TIMEOUT = 10.0
 # 模块自带的 wheel 动辄几十 MB（opencv / onnxruntime），10 秒的清单级超时不够；
 # 这里的 timeout 是「单次 socket 读」的上限，不是整个传输的时限。
@@ -553,14 +557,20 @@ class ModuleStore:
     @staticmethod
     def _unpack_zip(path: str, entry: dict, r: dict, tmp: str) -> None:
         with zipfile.ZipFile(path) as archive:
-            prefix = f"{r['repo']}-{r['branch']}/" + (f"{entry['path']}/"
-                                                     if entry.get("path") else "")
+            root = f"{r['repo']}-{r['branch']}/"
+            prefix = root + (f"{entry['path']}/" if entry.get("path") else "")
             names = [name for name in archive.namelist()
                      if name.startswith(prefix) and not name.endswith("/")]
             if not names:
                 raise RuntimeError("仓库快照里没有本模块目录")
-            for name in names:
-                rel = name[len(prefix):]
+            wanted = [(name, name[len(prefix):]) for name in names]
+            if "readme.md" not in {rel.lower() for _, rel in wanted}:
+                # 仓库根上的 README 也带一份，落到模块目录里（同上）。
+                for name in archive.namelist():
+                    if name.lower() in {root + d.lower() for d in ROOT_DOC_NAMES}:
+                        wanted.append((name, "README.md"))
+                        break
+            for name, rel in wanted:
                 target = os.path.join(tmp, *rel.split("/"))
                 parent = os.path.dirname(target)
                 if parent:
@@ -585,16 +595,24 @@ class ModuleStore:
         """市场清单里属于本模块目录的文件：(仓库内路径, 模块内相对路径)。"""
         prefix = f"{entry['path']}/" if entry.get("path") else ""
         pairs: list[tuple[str, str]] = []
+        root_docs: list[str] = []
         for item in entry.get("files") or []:
             name = str(item)
             if name.startswith("_deps/") or "__pycache__" in name:
                 continue
-            if prefix:
-                if not name.startswith(prefix):
-                    continue
-                pairs.append((name, name[len(prefix):]))
-            else:
+            if not prefix:
                 pairs.append((name, name))
+            elif name.startswith(prefix):
+                pairs.append((name, name[len(prefix):]))
+            elif name in ROOT_DOC_NAMES:
+                root_docs.append(name)
+        owned = {rel.lower() for _, rel in pairs}
+        for name in root_docs:
+            # 模块目录里自己带的那份优先，仓库根上那份只补缺。
+            if "readme.md" in owned:
+                break
+            pairs.append((name, "README.md"))
+            owned.add("readme.md")
         return pairs
 
     def _fetch_one(self, entry: dict, repo_path: str, target: str,

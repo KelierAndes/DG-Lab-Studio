@@ -535,8 +535,10 @@ class BleClient:
             session._awaiting_seq = seq
             session._await_since = session.ticks
             method = (ma << 2) | mb
-        await self._write(session, build_b0(seq, method, va, vb, fa, sa, fb, sb))
+        # 先记账再写：这一格记的是「我们命令设备输出的强度」，写失败（超时 / 断连）
+        # 时它照样发生过，只是没送到——留在波形里才看得懂那一段为什么有柱子。
         session.monitor.record(sa, sb)
+        await self._write(session, build_b0(seq, method, va, vb, fa, sa, fb, sb))
 
     async def _write_ovc(self, session: BleSession) -> None:
         wave_a, wave_b = [0, 0, 0, 0], [0, 0, 0, 0]
@@ -544,8 +546,8 @@ class BleClient:
             cycle = session._cycles[ch]
             if cycle.frames:
                 out[:] = ovc_channel_pattern(cycle.next_frame())
-        await self._write(session, build_ovc_b0(wave_a, wave_b))
         session.monitor.record(wave_a, wave_b)
+        await self._write(session, build_ovc_b0(wave_a, wave_b))
         if (session._targets["A"], session._targets["B"]) != (
             session._screen.get("A"), session._screen.get("B")
         ):
@@ -671,6 +673,11 @@ class BleClient:
         if byte is None:
             raise RuntimeError(f"未知颜色: {color}")
         session.led_color = byte
+        # 界面要回显当前颜色：props 里存键名（标签与色值由桥的 led_options 映射）。
+        # 不写这一笔的话切完颜色机身变了、下拉还是「熄灭」。
+        key = color if isinstance(color, str) else next(
+            (k for k, v in LED_COLORS.items() if v == byte), "off")
+        self._slot(session).props["led"] = key
         if session.kind == "ovc":
             await self._write(session, build_ovc_50(enable_buttons=True, color=byte))
         elif session.kind == "bmtr":
@@ -678,6 +685,7 @@ class BleClient:
         else:
             await self._write(session, build_coyote_50(color=byte))
         self._log(f"{session.slot_id} LED 颜色 → {color}")
+        self._publish()
 
     async def bmtr_flip(self, slot_id: str | None = None) -> None:
         session = self._session(slot_id)

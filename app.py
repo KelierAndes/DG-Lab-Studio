@@ -21,7 +21,7 @@ from dglab.relay_v3 import RelayV3Server
 from dglab.relay_v4 import RelayV4Server
 from dglab.socket_v3 import DEFAULT_V3_RELAY, SocketV3Client
 from dglab.socket_v4 import DEFAULT_V4_RELAY, SocketV4Client
-from dglab.state import EngineState, StateEvents, family_of
+from dglab.state import EngineState, Slot, StateEvents, family_of
 from dglab.waves import (CONTINUOUS, COYOTE_WAVEFORMS, CoyoteWaveform,
                          PULSE_STREAM, SILENT, pulse_frame,
                          pulse_frame_vibration, resolve_wave_frames,
@@ -34,6 +34,12 @@ def _base_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+# 三条通道并存：v4 / v3 各自一个客户端（可带一个本地中继），蓝牙自己管多台设备。
+# 键名与各自 EngineState.backend 一致，连接页按这个顺序平铺三张卡。
+CHANNEL_KEYS = ("v4", "v3", "ble")
+CHANNEL_LABELS = {"v4": "Socket V4", "v3": "Socket V3", "ble": "蓝牙直连"}
 
 
 class Config(dict):
@@ -133,6 +139,10 @@ class Engine:
 
         self._backend: SocketV4Client | SocketV3Client | BleClient | None = None
         self._relay: RelayV4Server | RelayV3Server | None = None
+        # 通道登记表：_backend / _relay 仍是「主用」那一对，旧代码与测试直接读它们。
+        self._channels: dict[str, object] = {}
+        self._relays: dict[str, RelayV4Server | RelayV3Server] = {}
+        self._primary = ""
         self._selected_wave: dict[str, CoyoteWaveform | str] = {
             "A": SILENT,
             "B": SILENT,
@@ -214,105 +224,212 @@ class Engine:
             pass
 
     def get_state(self) -> EngineState:
-        if self._backend is not None:
-            return self._backend.state
-        return EngineState()
+        """多通道合并视图：槽位取各通道并集，其余字段以主用通道为准。"""
+        chans = self.active_channels()
+        if not chans:
+            return EngineState()
+        primary = chans.get(self._primary) or next(iter(chans.values()))
+        if getattr(primary, "state", None) is None:
+            return EngineState()
+        merged = primary.state.copy()
+        for key, backend in chans.items():
+            if backend is primary or getattr(backend, "state", None) is None:
+                continue
+            for sid, slot in backend.state.slots.items():
+                merged.slots.setdefault(sid, Slot(**{**vars(slot)}))
+            merged.qr_text = merged.qr_text or backend.state.qr_text
+            merged.client_id = merged.client_id or backend.state.client_id
+        merged.connected = any(b.state.connected for b in chans.values()
+                               if getattr(b, "state", None) is not None)
+        merged.backend = primary.state.backend
+        return merged
+
+    def active_channels(self) -> dict[str, object]:
+        """通道 → 后端。`_backend` 仍可被直接赋值（旧界面与测试），不在登记表里时按通道补上。"""
+        out = {k: b for k, b in self._channels.items() if b is not None}
+        if self._backend is not None and not any(b is self._backend for b in out.values()):
+            # 直接赋值的主用后端（旧界面与测试的假后端可能没有 state）也要能被找到。
+            key = str(getattr(getattr(self._backend, "state", None), "backend", "") or "")
+            out[key if key in CHANNEL_KEYS else CHANNEL_KEYS[0]] = self._backend
+        return {k: out[k] for k in CHANNEL_KEYS if k in out}
+
+    def slot_channels(self) -> dict[str, str]:
+        """槽位 → 通道：控制页卡头要写明这台设备是从哪条通道进来的。"""
+        out: dict[str, str] = {}
+        for key, backend in self.active_channels().items():
+            state = getattr(backend, "state", None)
+            for sid in getattr(state, "slots", {}) or {}:
+                out.setdefault(sid, key)
+        return out
+
+    def channel_states(self) -> list[dict]:
+        """连接页要按通道各说各话：三条通道永远都在，没连的那条给出空状态。"""
+        chans = self.active_channels()
+        rows = []
+        for key in CHANNEL_KEYS:
+            backend = chans.get(key)
+            state = getattr(backend, "state", None) if backend is not None else None
+            if state is None:
+                state = EngineState(backend=key)
+            rows.append({
+                "key": key,
+                "label": CHANNEL_LABELS[key],
+                "backend": state.backend or key,
+                "present": backend is not None,
+                "primary": key == self._primary and backend is not None,
+                "connected": bool(state.connected),
+                "paired": bool(state.paired),
+                "status_text": state.status_text,
+                "client_id": state.client_id,
+                "target_id": state.target_id,
+                "qr_text": state.qr_text,
+                "slots": sorted(state.slots),
+                "local_relay": key in self._relays,
+                "relay_port": self._relay_port(key),
+            })
+        return rows
+
+    def _relay_port(self, key: str) -> int | None:
+        relay = self._relays.get(key)
+        return int(getattr(relay, "port", 0) or 0) or None
+
+    def _adopt(self, key: str, backend) -> None:
+        """连上的通道登记进表，并把「主用」指针挪过去。"""
+        self._channels[key] = backend
+        self._backend = backend
+        self._primary = key
+
+    def _release(self, key: str) -> None:
+        backend = self._channels.pop(key, None)
+        if self._backend is not backend and not (backend is None and self._primary == key):
+            return
+        # 先把主用指针摘干净，再去看还剩哪些通道：`active_channels()` 会把「没登记进
+        # 表但还被 `_backend` 指着的后端」按通道补回来，刚释放的那个正好还挂在上面，
+        # 于是被自己重新认成主用——断开以后 `present` 永远是真的，概览上那条通道
+        # 一直显示「等待客户端」，可日志里早就写了「通道已断开」。
+        self._backend = None
+        self._primary = ""
+        chans = self.active_channels()
+        self._primary = next(iter(chans), "")
+        self._backend = chans.get(self._primary)
 
     @property
     def backend_kind(self) -> str:
         return self._backend.state.backend if self._backend else "none"
 
+    async def _stop_channel(self, key: str) -> None:
+        await self._stop_relay(key)
+        backend = self._channels.get(key)
+        if backend is not None:
+            try:
+                await backend.disconnect()
+            except Exception:
+                pass
+        self._release(key)
+
     async def _disconnect_backend(self) -> None:
+        """断开全部通道（旧名字保留：旧界面与关停路径都在用）。"""
+        for key in list(self._channels):
+            await self._stop_channel(key)
         if self._backend is not None:
             try:
                 await self._backend.disconnect()
             except Exception:
                 pass
             self._backend = None
+        self._primary = ""
         await self._stop_relay()
         self.flow.reset()
         self.events.emit("state", self.get_state())
 
-    async def connect_v4(self) -> None:
-        await self._disconnect_backend()
-        client = SocketV4Client(self.config["v4_url"], events=self.events)
-        self._backend = client
+    async def disconnect_channel(self, key: str) -> None:
+        if key not in CHANNEL_KEYS:
+            raise ValueError(f"未知通道 {key!r}")
+        await self._stop_channel(key)
+        if not self._channels:
+            self.flow.reset()
+        self.events.emit("state", self.get_state())
+        self._log(f"{CHANNEL_LABELS[key]} 通道已断开")
+
+    async def _connect_relay_channel(self, key: str, *, client_for, relay_for=None,
+                                     port: int | None = None) -> None:
+        """开一条中继通道：可选地先起本地中继，再连本通道的客户端。
+
+        只顶掉同通道的旧连接——v4 与 v3、蓝牙之间互不打断，多通道可以并存。
+        """
+        await self._stop_channel(key)
+        qr_base = None
+        if port is None:
+            url = self.config[f"{key}_url"]
+        else:
+            if relay_for is None:
+                raise ValueError(f"{key} 通道不支持本地中继")
+            relay = relay_for(port)
+            try:
+                await relay.start()
+            except OSError as exc:
+                self._log(f"{CHANNEL_LABELS[key]} 本地中继启动失败 (端口 {port} 被占用?): {exc!r}")
+                raise
+            self._relays[key] = relay
+            self._relay = relay
+            qr_base = f"ws://{local_lan_ip()}:{port}"
+            self._log(f"本地中继地址: {qr_base} (App 需与电脑同一局域网)")
+            url = f"ws://127.0.0.1:{port}"
+        client = client_for(url, qr_base)
+        self._adopt(key, client)
         try:
             await client.connect()
         except Exception:
-            self._backend = None
+            await self._stop_channel(key)
             raise
+        self.events.emit("state", self.get_state())
+
+    async def connect_v4(self) -> None:
+        await self._connect_relay_channel(
+            "v4", client_for=lambda url, qr: SocketV4Client(url, events=self.events, qr_base=qr))
 
     async def connect_v3(self) -> None:
-        await self._disconnect_backend()
-        client = SocketV3Client(self.config["v3_url"], events=self.events)
-        self._backend = client
-        try:
-            await client.connect()
-        except Exception:
-            self._backend = None
-            raise
+        await self._connect_relay_channel(
+            "v3", client_for=lambda url, qr: SocketV3Client(url, events=self.events, qr_base=qr))
 
     async def connect_v4_local(self, port: int | None = None) -> None:
-        await self._disconnect_backend()
-        port = int(port or self.config["relay"]["v4_port"])
-        relay = RelayV4Server(port=port, events=self.events)
-        try:
-            await relay.start()
-        except OSError as exc:
-            self._log(f"V4 本地中继启动失败 (端口 {port} 被占用?): {exc!r}")
-            raise
-        self._relay = relay
-        qr_base = f"ws://{local_lan_ip()}:{port}"
-        self._log(f"本地中继地址: {qr_base} (App 需与电脑同一局域网)")
-        client = SocketV4Client(
-            f"ws://127.0.0.1:{port}", events=self.events, qr_base=qr_base
-        )
-        self._backend = client
-        try:
-            await client.connect()
-        except Exception:
-            await self._stop_relay()
-            self._backend = None
-            raise
+        await self._connect_relay_channel(
+            "v4",
+            client_for=lambda url, qr: SocketV4Client(url, events=self.events, qr_base=qr),
+            relay_for=lambda p: RelayV4Server(port=p, events=self.events),
+            port=int(port or self.config["relay"]["v4_port"]))
 
     async def connect_v3_local(self, port: int | None = None) -> None:
-        await self._disconnect_backend()
-        port = int(port or self.config["relay"]["v3_port"])
-        relay = RelayV3Server(port=port, events=self.events)
-        try:
-            await relay.start()
-        except OSError as exc:
-            self._log(f"V3 本地中继启动失败 (端口 {port} 被占用?): {exc!r}")
-            raise
-        self._relay = relay
-        qr_base = f"ws://{local_lan_ip()}:{port}"
-        self._log(f"本地中继地址: {qr_base} (App 需与电脑同一局域网)")
-        client = SocketV3Client(
-            f"ws://127.0.0.1:{port}", events=self.events, qr_base=qr_base
-        )
-        self._backend = client
-        try:
-            await client.connect()
-        except Exception:
-            await self._stop_relay()
-            self._backend = None
-            raise
+        await self._connect_relay_channel(
+            "v3",
+            client_for=lambda url, qr: SocketV3Client(url, events=self.events, qr_base=qr),
+            relay_for=lambda p: RelayV3Server(port=p, events=self.events),
+            port=int(port or self.config["relay"]["v3_port"]))
 
-    async def _stop_relay(self) -> None:
-        if self._relay is not None:
+    async def _stop_relay(self, key: str | None = None) -> None:
+        """停中继：给了通道号就只停那一条，没给就全停（`_relay` 字段留给旧代码读）。"""
+        keys = [key] if key else list(self._relays)
+        for k in keys:
+            relay = self._relays.pop(k, None)
+            if relay is None:
+                continue
             try:
-                await self._relay.stop()
+                await relay.stop()
             except Exception:
                 pass
+            if self._relay is relay:
+                self._relay = next(iter(self._relays.values()), None)
+        if key is None:
             self._relay = None
 
     async def ble_connect(self, address: str, kind: str = "coyote_v3") -> None:
         ble_cfg = self.config["ble"]
-        if isinstance(self._backend, BleClient):
-            client = self._backend
+        existing = self._channels.get("ble")
+        if isinstance(existing, BleClient):
+            client = existing
         else:
-            await self._disconnect_backend()
+            # 只顶掉蓝牙通道自己：v4 / v3 的客户端与本地中继不受影响。
+            await self._stop_channel("ble")
             client = BleClient(
                 events=self.events,
                 soft_limit_a=int(ble_cfg["soft_limit_a"]),
@@ -322,17 +439,24 @@ class Engine:
                 strength_balance_a=int(ble_cfg["strength_balance_a"]),
                 strength_balance_b=int(ble_cfg["strength_balance_b"]),
             )
-            self._backend = client
+            self._adopt("ble", client)
         try:
             await client.connect(address, kind)
         except Exception:
             if not client.sessions:
-                self._backend = None
+                self._release("ble")
             raise
         slot = client.state.slots.get(address)
         self.remember_device(address, kind, (slot.name if slot else None) or kind)
 
     async def ble_disconnect_device(self, slot_id: str) -> None:
+        client = self._channels.get("ble")
+        if isinstance(client, BleClient):
+            await client.disconnect(slot_id)
+            if not client.sessions:
+                self._release("ble")
+            self.events.emit("state", self.get_state())
+            return
         if isinstance(self._backend, BleClient):
             await self._backend.disconnect(slot_id)
 
@@ -372,7 +496,7 @@ class Engine:
                 await asyncio.sleep(2.0)
                 if not self.config.get("auto_reconnect"):
                     continue
-                backend = self._backend
+                backend = self._channels.get("ble")
                 if not isinstance(backend, BleClient):
                     continue
                 now = time.monotonic()
@@ -396,9 +520,17 @@ class Engine:
     async def ble_scan(self, timeout: float = 6.0) -> list[dict]:
         return await BleClient.scan(timeout)
 
-    def _require_backend(self):
+    def _require_backend(self, slot_id: str | None = None):
+        """取要发指令的后端：给了槽位就找持有它的通道，否则用主用通道。"""
+        if slot_id:
+            for _key, backend in self.active_channels().items():
+                if slot_id in getattr(backend.state, "slots", {}):
+                    return backend
         if self._backend is None:
-            raise RuntimeError("没有已连接的设备")
+            chans = self.active_channels()
+            if not chans:
+                raise RuntimeError("没有已连接的设备")
+            return chans.get(self._primary) or next(iter(chans.values()))
         return self._backend
 
     def devices(self) -> list[dict]:
@@ -428,6 +560,18 @@ class Engine:
                 return sid
         return None
 
+    def _is_ovc(self, slot_id: str | None) -> bool:
+        slot = self.get_state().slots.get(slot_id or "")
+        return slot is not None and slot.type.upper().startswith("OVC")
+
+    @staticmethod
+    def step10(value) -> int:
+        """负鼠的最低调节量是 10：整数项一律按 10 取整并夹在 0 / 10..200。"""
+        v = int(value)
+        if v <= 0:
+            return 0
+        return max(10, min(200, int(round(v / 10.0) * 10)))
+
     def _quantize_for_device(self, slot, value: int) -> int:
         if slot is not None and slot.type.upper().startswith("OVC"):
             return int(value / 10.0 + 0.5) * 10
@@ -449,6 +593,24 @@ class Engine:
         "fire_duration_s": (0.1, 60.0, float),
     }
 
+    def param_step(self, key: str, slot_id: str | None = None) -> float:
+        """界面 +/- 一次走多少：负鼠整数项走 10，其余整数走 1，浮点走 0.1。
+
+        步进要和写入时的取整一致，否则点一下加会被引擎抹回原值，看着像按钮失灵。
+        """
+        cast = self.INTENSITY_PARAM_RANGES.get(key, (0, 0, int))[2]
+        if cast is float:
+            return 0.1
+        return 10.0 if self._is_ovc(slot_id) else 1.0
+
+    def _ovc_num(self, sid: str | None, key: str, default: int) -> int:
+        value = int(self.device_setting(sid, key) or default)
+        return self.step10(value) if self._is_ovc(sid) else value
+
+    def _ovc_fire(self, sid: str | None, channel: str) -> int:
+        value = self._fire_setting(sid, channel)
+        return self.step10(value) if self._is_ovc(sid) else value
+
     def intensity_params(self, slot_id: str | None = None) -> dict:
         state = self.get_state()
         sid = self.resolve_slot(slot_id)
@@ -465,11 +627,11 @@ class Engine:
                                else {"A": 200, "B": 200}),
             "channel_status": (dict(slot.channel_status) if slot is not None
                                else {"A": 0, "B": 0}),
-            "max_strength": int(self.device_setting(sid, "max_strength") or 100),
+            "max_strength": self._ovc_num(sid, "max_strength", 100),
             "strength_step": self.device_step(sid),
-            "fire_strength": int(self.device_setting(sid, "fire_strength") or 0),
-            "fire_strength_a": _fire_raw("A"),
-            "fire_strength_b": _fire_raw("B"),
+            "fire_strength": self._ovc_num(sid, "fire_strength", 0),
+            "fire_strength_a": self._ovc_fire(sid, "A"),
+            "fire_strength_b": self._ovc_fire(sid, "B"),
             "fire_duration_s": float(self.device_setting(sid, "fire_duration_s") or 1.0),
             "wave_duration_s": float(self.config.get("wave_duration_s", 10.0)),
             "wave": self.wave_selection(),
@@ -522,6 +684,9 @@ class Engine:
                 value = max(low, min(high, cast(value)))
             except (TypeError, ValueError):
                 raise ValueError(f"无效的 {key}: {value!r}") from None
+            if cast is int and self._is_ovc(slot_id):
+                # 写进去的也要在 10 的格子上，否则界面显示的和实际用的差一截。
+                value = self.step10(value)
             if slot_id:
                 self.config.setdefault("device_settings", {}).setdefault(
                     slot_id, {})[key] = value
@@ -537,11 +702,11 @@ class Engine:
         return {ch: str(self._selected_wave.get(ch) or SILENT) for ch in ("A", "B")}
 
     async def set_strength(self, channel: str, value: int, slot_id: str | None = None) -> None:
-        backend = self._require_backend()
+        sid = self.resolve_slot(slot_id, output_only=True)
+        backend = self._require_backend(sid)
         limit = int(self.device_setting(slot_id, "max_strength") or 100)
         value = max(0, min(limit, int(value)))
         if isinstance(backend, SocketV4Client):
-            sid = self.resolve_slot(slot_id, output_only=True)
             if sid is None:
                 raise RuntimeError("V4 尚未接入设备")
             await backend.set_strength(channel, value, slot_id=sid)
@@ -551,8 +716,8 @@ class Engine:
             await backend.set_strength(channel, value, slot_id=self.resolve_slot(slot_id))
 
     async def add_strength(self, channel: str, delta: int, slot_id: str | None = None) -> None:
-        backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
+        backend = self._require_backend(sid)
         if isinstance(backend, SocketV4Client):
             slot = backend.state.slots.get(sid) if sid else None
             if slot is None:
@@ -570,24 +735,27 @@ class Engine:
             await backend.add_strength(channel, delta, slot_id=sid)
 
     async def set_wave(self, channel: str, name: str, slot_id: str | None = None) -> None:
-        backend = self._require_backend()
+        sid = self.resolve_slot(slot_id, output_only=True)
+        backend = self._require_backend(sid)
         self._selected_wave[channel] = name
         if isinstance(backend, SocketV4Client):
-            await backend.set_wave(channel, name, slot_id=self.resolve_slot(slot_id, output_only=True))
+            await backend.set_wave(channel, name, slot_id=sid)
         elif isinstance(backend, SocketV3Client):
             await backend.send_wave(
                 channel, name, float(self.config["wave_duration_s"])
             )
         else:
-            await backend.set_wave(channel, name, slot_id=self.resolve_slot(slot_id, output_only=True))
+            await backend.set_wave(channel, name, slot_id=sid)
 
     async def push_pulse_stream(self, frequency: int, channel: str = "A",
                                 level: int = 100, slot_id: str | None = None) -> None:
-        backend = self._backend
-        if backend is None:
-            return
         if self._selected_wave.get(channel) != PULSE_STREAM:
             return
+        chans = self.active_channels()
+        if self._backend is None and not chans:
+            return
+        # 先看后端支不支持：这条报错说的是连接方式，不该被槽位解析抢先短路。
+        backend = self._require_backend(slot_id)
         push = getattr(backend, "push_pulse_frame", None)
         if push is None:
             raise RuntimeError("当前连接方式不支持外部脉冲流")
@@ -607,8 +775,8 @@ class Engine:
         await push(sid, channel, frame)
 
     async def reset_strength(self, channel: str, slot_id: str | None = None) -> None:
-        backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
+        backend = self._require_backend(sid)
         if isinstance(backend, SocketV4Client):
             await backend.reset_intensity(channel, slot_id=sid)
         elif isinstance(backend, SocketV3Client):
@@ -618,8 +786,8 @@ class Engine:
         await self.set_wave(channel, SILENT, slot_id=sid)
 
     async def clear_wave(self, channel: str | None = None, slot_id: str | None = None) -> None:
-        backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
+        backend = self._require_backend(sid)
         for ch in ("A", "B"):
             if channel in (None, ch):
                 await self.set_wave(ch, SILENT, slot_id=sid)
@@ -628,9 +796,15 @@ class Engine:
         await self.fire(slot_id=slot_id, duration_s=seconds, channel=channel)
 
     async def emergency_stop(self) -> None:
-        backend = self._require_backend()
         self._cancel_fire_holds()
-        await backend.emergency_stop()
+        chans = self.active_channels()
+        if not chans:
+            raise RuntimeError("没有已连接的设备")
+        # 急停要覆盖每一条通道：多通道并存时只停主用那条会留下另一路在开火。
+        for _key, backend in chans.items():
+            stop = getattr(backend, "emergency_stop", None)
+            if stop is not None:
+                await stop()
         state = self.get_state()
         for sid in sorted(state.slots):
             slot = state.slots[sid]
@@ -663,8 +837,8 @@ class Engine:
 
     async def fire(self, slot_id: str | None = None, duration_s: float | None = None,
                    channel: str | None = None) -> None:
-        backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
+        backend = self._require_backend(sid)
         if sid is None:
             raise RuntimeError("没有可用设备")
         duration = float(duration_s or self.config["fire_duration_s"])
@@ -694,8 +868,8 @@ class Engine:
 
     async def fire_start(self, slot_id: str | None = None,
                          channel: str | None = None) -> None:
-        backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
+        backend = self._require_backend(sid)
         if sid is None:
             raise RuntimeError("没有可用设备")
         channels = self._fire_channels(channel)
@@ -756,8 +930,8 @@ class Engine:
 
     async def fire_stop(self, slot_id: str | None = None,
                         channel: str | None = None) -> None:
-        backend = self._require_backend()
         sid = self.resolve_slot(slot_id, output_only=True)
+        backend = self._require_backend(sid)
         if sid is None:
             return
         channels = self._fire_channels(channel)
@@ -827,29 +1001,33 @@ class Engine:
                   f"触发开火结束 (强度与波形已恢复)")
 
     async def set_led_color(self, color: str, slot_id: str | None = None) -> None:
-        backend = self._require_backend()
+        sid = self.resolve_slot(slot_id)
+        backend = self._require_backend(sid)
         if isinstance(backend, BleClient):
-            await backend.set_led(color, slot_id=self.resolve_slot(slot_id))
+            await backend.set_led(color, slot_id=sid)
         else:
             self._log("LED 颜色切换目前仅支持蓝牙直连 (郊狼/负鼠/灵猫)")
 
     async def bmtr_flip(self, slot_id: str | None = None) -> None:
-        backend = self._require_backend()
+        sid = self.resolve_slot(slot_id, family="BMTR")
+        backend = self._require_backend(sid)
         if isinstance(backend, BleClient):
-            await backend.bmtr_flip(slot_id=self.resolve_slot(slot_id, family="BMTR"))
+            await backend.bmtr_flip(slot_id=sid)
         else:
             self._log("屏幕翻转目前仅支持蓝牙直连的灵猫")
 
     def wave_history(self, slot_id: str | None = None):
-        backend = self._backend
+        sid = self.resolve_slot(slot_id)
+        chans = self.active_channels()
+        backend = chans.get(self._primary) if self._primary in chans else None
+        if sid:
+            backend = next((b for b in chans.values() if sid in b.state.slots), backend)
         if backend is None:
             return None
         if isinstance(backend, BleClient):
-            sid = self.resolve_slot(slot_id)
             session = backend.sessions.get(sid) if sid else None
             return session.monitor if session else None
         if isinstance(backend, SocketV4Client):
-            sid = self.resolve_slot(slot_id)
             return backend.monitors.get(sid) if sid else None
         return None
 
@@ -1111,14 +1289,15 @@ class Engine:
         self._log(f"{slot_id} 通道 {channel} 波形步进 {'+' if delta > 0 else '-'}1 → {target}")
 
     async def reset_pressure(self, slot_id: str | None = None) -> None:
-        backend = self._require_backend()
+        sid = self.resolve_slot(slot_id, family="BMTR")
+        backend = self._require_backend(sid)
         if isinstance(backend, BleClient):
-            await backend.reset_pressure(slot_id=self.resolve_slot(slot_id, family="BMTR"))
+            await backend.reset_pressure(slot_id=sid)
         else:
             self._log("气压清零仅支持蓝牙直连的灵猫 (BMTR)")
 
     async def select_slot(self, slot_id: str) -> None:
-        backend = self._require_backend()
+        backend = self._require_backend(slot_id)
         if isinstance(backend, SocketV4Client):
             backend.select_slot(slot_id)
 

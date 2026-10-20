@@ -18,8 +18,6 @@ from module_store import (ModuleStore, _embedded_python_dir,
 from plugins import PluginManager, _CLEANUP_MARKER
 from types import SimpleNamespace
 
-from ui.modules_page import online_section_state
-
 
 class _FakeConfig(dict):
     def __init__(self, path):
@@ -518,30 +516,6 @@ class MarketSettingsTests(unittest.TestCase):
         direct = next(h for h in opener.handlers
                       if isinstance(h, ProxyHandler))
         self.assertEqual(direct.proxies, {"http": None, "https": None})
-
-
-class OnlineSectionStateTests(unittest.TestCase):
-
-    def test_idle_before_any_fetch(self):
-        store = SimpleNamespace(entries=[], fetched_at=0.0, last_error="")
-        self.assertEqual(online_section_state(store), ("idle", []))
-
-    def test_ready_after_successful_fetch(self):
-        store = SimpleNamespace(
-            entries=[{"id": "osc_bridge", "version": "1.5.0"}],
-            fetched_at=1.0, last_error="")
-        state, entries = online_section_state(store)
-        self.assertEqual(state, "ready")
-        self.assertEqual([e["id"] for e in entries], ["osc_bridge"])
-
-    def test_ready_after_cache_fallback(self):
-        store = SimpleNamespace(entries=[{"id": "x"}], fetched_at=0.0,
-                                last_error="raw: timeout")
-        self.assertEqual(online_section_state(store)[0], "ready")
-
-    def test_empty_after_successful_but_empty_market(self):
-        store = SimpleNamespace(entries=[], fetched_at=1.0, last_error="")
-        self.assertEqual(online_section_state(store), ("empty", []))
 
 
 class DownloadTests(unittest.TestCase):

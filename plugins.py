@@ -677,6 +677,9 @@ class PluginManager:
                 self._meta[module_id] = {
                     "id": module_id,
                     "name": str(meta.get("name") or module_id),
+                    # 模块自己声明的简写（AIC / OSC…）：事件流的变量名与概览页的
+                    # 数据流线路都靠它标出「这一路归哪个模块」，没声明就留空。
+                    "short": str(meta.get("short") or "").strip().upper(),
                     "version": str(meta.get("version") or "0.1.0"),
                     "description": str(meta.get("description") or ""),
                     "settings_key": str(meta.get("settings_key") or ""),
@@ -739,6 +742,20 @@ class PluginManager:
 
     def _enabled_map(self) -> dict:
         return self._modules_state.setdefault("enabled", {})
+
+    def installed(self, module_id: str) -> bool:
+        """模块还在不在盘上（装了没启用、还没加载都算在）。
+
+        事件流清理失效卡片要用它判断「模块真的被卸了」，不能只看内存里的登记表：
+        开机时清理可能跑在 `discover()` 之前，那时模块还没登记进来，它登记的
+        读数 / 写入卡会被当成失效卡片整列删掉。
+        """
+        if not module_id:
+            return False
+        if module_id in self._paths:
+            return True
+        return any(os.path.isfile(os.path.join(root, module_id, "plugin.py"))
+                   for root in module_roots())
 
     def is_enabled(self, module_id: str) -> bool:
         enabled = self._enabled_map()
@@ -854,9 +871,12 @@ class PluginManager:
     def inject_module_profiles(self, module_id: str) -> None:
         """把模块自带的默认事件流 / 按键映射登记为**可选**配置文件。
 
-        每个模块版本只注入一次（版本号记在模块设置里）；同名配置已存在且不是
-        本模块上次注入的就不碰——用户自建的同名配置永不被覆盖，升级模块时
-        自己注入过的那份会被新版本覆盖。
+        只在两种情况下写文件：这份配置不存在（首次注入，或用户删掉后要补回），
+        或模块升级了（版本号变了）而这份配置确实是本模块注入的。同名配置是用户
+        自建的就永不覆盖。
+
+        以前是「只要名字记在本模块名下就每次装载都盖一遍」——结果用户在画布上
+        整理好的布局，重启一次就被模块自带的默认坐标抹回去。
         """
         version = str((self._meta.get(module_id) or {}).get("version")
                       or getattr(self._instances.get(module_id), "version", "") or "")
@@ -867,38 +887,59 @@ class PluginManager:
         done = marker if isinstance(marker, dict) else {}
         flow_done = [str(n) for n in done.get("flow") or []]
         bind_done = [str(n) for n in done.get("bindings") or []]
+        # 只有模块真的换了版本，才允许刷新自己注入过的那几份默认配置。
+        upgraded = bool(done.get("version")) and str(done.get("version")) != version
         flows, binds = self._module_profile_files(module_id)
         if not flows and not binds:
             return
         flow_dir = event_flow.profiles_dir(self._config_dir())
         active, known = event_flow.load_profiles(flow_dir)
+        injected: list[str] = []
         for name, graphs in flows:
-            if name in known and name not in flow_done:
+            if name not in known:
+                known[name] = graphs
+                injected.append(name)
+                if name not in flow_done:
+                    flow_done.append(name)
+                self.engine._log(
+                    f"模块 {module_id} 的默认事件流已登记为可选配置：「{name}」")
+                continue
+            if name in flow_done and upgraded:
+                known[name] = graphs
+                injected.append(name)
+                self.engine._log(
+                    f"模块 {module_id} 升级到 {version}，默认事件流「{name}」已刷新")
+                continue
+            if name not in flow_done:
                 self.engine._log(
                     f"模块 {module_id} 的默认事件流「{name}」与已有配置同名，未注入")
-                continue
-            known[name] = graphs
-            flow_done.append(name)
-            self.engine._log(
-                f"模块 {module_id} 的默认事件流已登记为可选配置：「{name}」")
         if flows:
             event_flow.save_profiles(active, known, flow_dir)
             runtime = getattr(getattr(self.engine, "flow", None), "runtime", None)
             if runtime is not None and getattr(runtime, "flow_dir", "") == flow_dir:
-                # 已在跑的运行时同步补上这几份配置，下拉框下次重建就能看到
-                for name, graphs in flows:
-                    runtime.profiles[name] = graphs
+                # 已在跑的运行时同步补上这几份配置，下拉框下次重建就能看到；
+                # 只同步本次真正写盘的，用户改过的那份不能被内存里的默认值顶掉。
+                by_name = dict(flows)
+                for name in injected:
+                    runtime.profiles[name] = by_name[name]
         bind_dir = binding_store.bindings_dir(self._config_dir())
         bind_active, bind_known = binding_store.load_binding_profiles(bind_dir)
         for name, rows in binds:
-            if name in bind_known and name not in bind_done:
+            if name not in bind_known:
+                bind_known[name] = rows
+                if name not in bind_done:
+                    bind_done.append(name)
+                self.engine._log(
+                    f"模块 {module_id} 的默认按键映射已登记为可选配置：「{name}」")
+                continue
+            if name in bind_done and upgraded:
+                bind_known[name] = rows
+                self.engine._log(
+                    f"模块 {module_id} 升级到 {version}，默认按键映射「{name}」已刷新")
+                continue
+            if name not in bind_done:
                 self.engine._log(
                     f"模块 {module_id} 的默认按键映射「{name}」与已有配置同名，未注入")
-                continue
-            bind_known[name] = rows
-            bind_done.append(name)
-            self.engine._log(
-                f"模块 {module_id} 的默认按键映射已登记为可选配置：「{name}」")
         if binds:
             # 「默认」映射始终存在：注入非默认命名的映射时当前配置不被带跑
             bind_known.setdefault("默认", {})
@@ -983,6 +1024,14 @@ class PluginManager:
                 settings.save()
             self.engine.events.emit("profiles_changed", module_id)
 
+    def default_profiles(self, module_id: str) -> dict:
+        """模块自带的默认配置名（事件流 / 按键映射）。
+
+        模块卡要拿它显示「这份模块带了哪几套配置」，并决定「一键套用」按钮在不在。
+        """
+        flows, binds = self._module_profile_names(module_id)
+        return {"flow": flows, "bindings": binds}
+
     def apply_module_default_profiles(self, module_id: str) -> list[str]:
         """模块卡片「快捷配置」：把模块自带的默认配置套用为当前配置。
 
@@ -1010,7 +1059,10 @@ class PluginManager:
                 for name, graphs in flows:
                     runtime.profiles[name] = graphs
                 if host is not None:
-                    switched = host.switch_profile(target)
+                    # 已经是当前配置时 switch_profile 返回 False——那正是「把这一份
+                    # 补回来」，不该报成「重启后生效」，用户会以为按钮没作用。
+                    switched = host.switch_profile(target) or \
+                        getattr(runtime, "active", "") == target
             note = f"模块 {module_id} 的事件流已套用默认配置「{target}」"
             if restored:
                 note += f"（补回缺失的 {'、'.join(restored)}）"
@@ -1082,6 +1134,13 @@ class PluginManager:
             self._meta[module_id]["running"] = False
         self._purge_module_cache(module_id)
         self._detach_deps_path(module_id)
+        # 停用即回收注入：模块不再跑，它的默认配置档留在列表里就是幽灵选项，
+        # 事件流 / 按键映射下拉会引用到已经不存在的动作。
+        try:
+            self.remove_module_profiles(module_id)
+        except Exception:
+            self.engine._log(f"模块 {module_id} 默认配置移除失败:\n"
+                             f"{traceback.format_exc()}")
         self.engine._log(f"模块已卸载: {inst.name or module_id}")
         self.engine.events.emit("modules_changed", module_id)
 
@@ -1105,7 +1164,9 @@ class PluginManager:
     async def deactivate(self, module_id: str) -> None:
         self._unregister_actions(module_id)
         self.set_enabled(module_id, False)
-        await self.stop(module_id)
+        # 停用要连实例一起放下：只 stop 的话模块还挂在内存里，
+        # 注入的默认配置档也不会被回收（旧版是「停止即清除注入」）。
+        await self.unload(module_id)
         self.engine.events.emit("modules_changed", module_id)
 
 
@@ -1127,6 +1188,26 @@ class PluginManager:
                                  f"{traceback.format_exc()}")
         return [dict(s) for s in ((self._meta.get(module_id) or {})
                                   .get("temps") or [])]
+
+    def derived_rows_for(self, module_id: str) -> dict[str, list[dict]]:
+        """模块现算出来的设置行（OSC 的设备参数）：只给界面看，不落配置文件。
+
+        存盘的话就多了第二份状态——设备一断、参数一改名，文件里那份立刻过期。
+        """
+        inst = self._instances.get(module_id)
+        hook = getattr(inst, "derived_rows", None)
+        if not callable(hook):
+            return {}
+        try:
+            out = hook()
+        except Exception:
+            self.engine._log(f"模块 {module_id} derived_rows() 失败:\n"
+                             f"{traceback.format_exc()}")
+            return {}
+        if not isinstance(out, dict):
+            return {}
+        return {str(key): [dict(r) for r in value if isinstance(r, dict)]
+                for key, value in out.items() if isinstance(value, list)}
 
     def temps_space(self, module_id: str = "") -> dict[str, float]:
         """全局共享的临时变量表：事件流卡片与所有模块读写同一命名空间。"""
@@ -1227,7 +1308,7 @@ class PluginManager:
 
     def delete_module(self, module_id: str) -> None:
         if module_id in self._instances:
-            raise RuntimeError(f"模块 {module_id} 正在运行，请先卸载")
+            raise RuntimeError(f"模块 {module_id} 还在运行，请先停止再卸载")
         module_dir = self.module_dir(module_id)
         if not module_dir:
             raise RuntimeError(f"未知模块: {module_id}")
@@ -1259,6 +1340,12 @@ class PluginManager:
                     f"模块 {module_id} 有文件被系统占用无法删除（{last_exc}），"
                     f"{stuck} 个已挽救至隔离区，残余文件已标记下次启动自动清理")
                 self._mark_auto_cleanup(module_dir)
+        # 文件没了就要把这条模块从「状态」里也抹干净：启用标记留在 modules.json
+        # 里，下次开机会去加载一个已经不存在的模块；共享值空间里的残值留在表里，
+        # 变量表会显示一行哪个模块都不认的幽灵参数。
+        self._drop_module_temps(module_id)
+        if self._enabled_map().pop(module_id, None) is not None:
+            self._modules_state.save()
         self.discover()
         self.engine._log(f"模块文件已删除: {module_id}")
         self.engine.events.emit("modules_changed", module_id)

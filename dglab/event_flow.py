@@ -52,6 +52,8 @@ CATEGORY_COLORS = {
     "逻辑": "#E11D48",
     "常数": "#059669",
     "变量": "#0EA5A0",
+    # 变量表拖出来的读数 / 赋值卡走「临时变量」这一类，不给色就跟别的卡一个样。
+    "临时变量": "#0891B2",
     "表达式": "#4F46E5",
     "实用": "#64748B",
     "失效": "#71717A",
@@ -67,6 +69,14 @@ PAGES = (PAGE_INPUT, PAGE_OUTPUT)
 ID_PREFIX = {PAGE_INPUT: "i", PAGE_OUTPUT: "o"}
 DEFAULT_PROFILE = "默认"
 _MOD_KINDS = ("read", "write")
+
+
+def _same_number(a: Any, b: Any) -> bool:
+    """两个写入值是否实质相同：同一拍里两张卡算出同一个数不该算冲突。"""
+    fa, fb = as_float(a), as_float(b)
+    if fa is None or fb is None:
+        return a == b
+    return abs(fa - fb) <= 1e-6
 
 
 def compatible(src: str, dst: str) -> bool:
@@ -135,12 +145,14 @@ def defn(key: str, title: str, en: str, cat: str, op: str, *, keys: str = "",
          tip: str = "", inputs: tuple = (), outputs: tuple = (),
          fields: tuple = (), page: str = "both", exec_in: bool = False,
          entry: bool = False, sink: bool = False,
-         palette: bool = True) -> dict[str, Any]:
+         palette: bool = True, short: str = "") -> dict[str, Any]:
     """palette=False：卡片存在（画布上能用、能由变量表拖入）但不进卡片面板列表。
 
+    short：这张卡的参数归谁——模块声明的简写（AIC / OSC…）或核心的 CORE。
+    概览页的「数据流探测」靠它把线路写成「郊狼A强度[CORE] ← 本期掉血[AIC]」。
     """
     return {"key": key, "title": title, "en": en, "cat": cat, "op": op,
-            "keys": keys, "tip": tip, "palette": palette,
+            "keys": keys, "tip": tip, "palette": palette, "short": short,
             "inputs": [p if isinstance(p, dict) else dict(p) for p in inputs],
             "outputs": [p if isinstance(p, dict) else dict(p) for p in outputs],
             "fields": [f for f in fields], "page": page,
@@ -168,95 +180,124 @@ STATIC: list[dict[str, Any]] = [
     defn("var.const_int", "整数", "Value (Int)", "常数", "const",
          outputs=(pin("整数", INT, 1),),
          fields=(field("v", "整数", "int", default=1),),
-         keys="zhengshu zs int value 整数常量"),
+         keys="zhengshu zs int value 整数常量",
+         tip="输出一个固定整数，左右拖动可直接改值"),
     defn("var.const_bool", "布尔", "Value (Bool)", "常数", "const",
          outputs=(pin("布尔", BOOL, True),),
          fields=(field("v", "布尔", "bool", default=True),),
-         keys="boer bool 真 假 开关 kg"),
+         keys="boer bool 真 假 开关 kg",
+         tip="输出真 / 假常量，常用来手动放行门控或固定分支走向"),
     defn("var.const_str", "文本", "Value (String)", "常数", "const",
          outputs=(pin("文本", STR, ""),),
          fields=(field("v", "文本", "str", default=""),),
-         keys="wenben wb str string 文本"),
+         keys="wenben wb str string 文本",
+         tip="输出一段固定文本，接给需要文本引脚的卡片"),
 
     # ---- 数学 ----
-    _math_def("add", "相加", "Add (+)", (pin("A"), pin("B")), keys="xiangjia xj add jia 求和 sum +"),
-    _math_def("sub", "相减", "Subtract (-)", (pin("A"), pin("B")), keys="xiangjian xj sub jian -"),
+    _math_def("add", "相加", "Add (+)", (pin("A"), pin("B")),
+              keys="xiangjia xj add jia 求和 sum +", tip="输出 A + B"),
+    _math_def("sub", "相减", "Subtract (-)", (pin("A"), pin("B")),
+              keys="xiangjian xj sub jian -", tip="输出 A − B，接反了两边就对调"),
     _math_def("mul", "相乘", "Multiply (*)",
-              (pin("A", FLOAT, 1.0), pin("B", FLOAT, 1.0)), keys="xiangcheng xc mul cheng *"),
+              (pin("A", FLOAT, 1.0), pin("B", FLOAT, 1.0)),
+              keys="xiangcheng xc mul cheng *", tip="输出 A × B，另一个脚接比例即可缩放"),
     _math_def("div", "相除", "Divide (/)",
-              (pin("A", FLOAT, 1.0), pin("B", FLOAT, 1.0)), keys="xiangchu xg div chu /"),
-    _math_def("mod", "取余", "Modulo (%)", (pin("A"), pin("B")), keys="quyu qy mod %"),
+              (pin("A", FLOAT, 1.0), pin("B", FLOAT, 1.0)),
+              keys="xiangchu xg div chu /", tip="输出 A ÷ B，除数为 0 时输出 0"),
+    _math_def("mod", "取余", "Modulo (%)", (pin("A"), pin("B")),
+              keys="quyu qy mod %", tip="输出 A 除以 B 的余数，除数为 0 时输出 0"),
     _math_def("pow", "幂", "Power", (pin("底", FLOAT, 2.0), pin("指数", FLOAT, 2.0)),
-              keys="mi pow 次方 指数"),
-    _math_def("min", "较小值", "Min", (pin("A"), pin("B")), keys="zuixiao zx min 最小"),
-    _math_def("max", "较大值", "Max", (pin("A"), pin("B")), keys="zuixiao zx max 最大"),
+              keys="mi pow 次方 指数", tip="输出底的指数次方（默认 2 的 2 次方）"),
+    _math_def("min", "较小值", "Min", (pin("A"), pin("B")),
+              keys="zuixiao zx min 最小", tip="A、B 里取较小的那个"),
+    _math_def("max", "较大值", "Max", (pin("A"), pin("B")),
+              keys="zuixiao zx max 最大", tip="A、B 里取较大的那个"),
     _math_def("lerp", "插值混合", "Mix (Lerp)",
               (pin("A"), pin("B", FLOAT, 1.0), pin("Alpha", FLOAT, 0.5)),
-              keys="chazhi cz hunhe hh mix lerp"),
+              keys="chazhi cz hunhe hh mix lerp",
+              tip="按 Alpha 在 A、B 之间混合：0 取 A，1 取 B，0.5 取中间"),
     defn("math.abs", "绝对值", "Abs", "数学", "abs", inputs=(pin("输入"),),
-         outputs=(pin("结果"),), keys="jueduizhi jd abs"),
+         outputs=(pin("结果"),), keys="jueduizhi jd abs",
+         tip="去掉负号，输出大小的正值"),
     defn("math.neg", "取反", "Negate", "数学", "neg", inputs=(pin("输入"),),
-         outputs=(pin("结果"),), keys="qufan qf neg 相反数"),
+         outputs=(pin("结果"),), keys="qufan qf neg 相反数",
+         tip="正负翻转，输出相反数"),
     defn("math.sqrt", "平方根", "Square Root", "数学", "sqrt", inputs=(pin("输入"),),
-         outputs=(pin("结果"),), keys="pingfanggen png sqrt 根号"),
+         outputs=(pin("结果"),), keys="pingfanggen png sqrt 根号",
+         tip="开平方，输入为负时输出 0"),
     defn("math.sin", "正弦", "Sin", "数学", "sin", inputs=(pin("弧度"),),
-         outputs=(pin("结果"),), keys="zhengxian zx sin"),
+         outputs=(pin("结果"),), keys="zhengxian zx sin",
+         tip="按弧度取正弦，结果在 −1 到 1（角度要先换算成弧度）"),
     defn("math.cos", "余弦", "Cos", "数学", "cos", inputs=(pin("弧度"),),
-         outputs=(pin("结果"),), keys="yuxian yx cos"),
+         outputs=(pin("结果"),), keys="yuxian yx cos",
+         tip="按弧度取余弦，结果在 −1 到 1（角度要先换算成弧度）"),
 
     # ---- 范围 ----
     defn("range.clamp", "钳制", "Clamp", "范围", "clamp",
          inputs=(pin("值"), pin("最小", FLOAT, 0.0), pin("最大", FLOAT, 200.0)),
-         outputs=(pin("结果"),), keys="qianzhi qz clamp limit 限制"),
+         outputs=(pin("结果"),), keys="qianzhi qz clamp limit 限制",
+         tip="把值压回最小 / 最大之间，超出就取边界"),
     defn("range.map", "范围映射", "Map Range", "范围", "map_range",
          inputs=(pin("值"), pin("源最小"), pin("源最大", FLOAT, 100.0),
                  pin("目标最小"), pin("目标最大", FLOAT, 200.0)),
-         outputs=(pin("结果"),), keys="fanwei yingshe fw ys map range remap"),
+         outputs=(pin("结果"),), keys="fanwei yingshe fw ys map range remap",
+         tip="按在源区间里的比例换算到目标区间，如 0-100 换成 0-200"),
     defn("range.round", "取整", "Round", "范围", "round", inputs=(pin("输入"),),
          outputs=(pin("结果", INT),),
          fields=(field("mode", "方式", "enum", default="round",
                        choices=("round", "floor", "ceil"),
                        labels=("四舍五入", "向下", "向上")),),
-         keys="quzheng qz round floor ceil 取整"),
+         keys="quzheng qz round floor ceil 取整",
+         tip="输出整数，方式可切四舍五入 / 向下 / 向上"),
 
     # ---- 逻辑 ----
     defn("logic.compare", "比较", "Compare", "逻辑", "compare",
          inputs=(pin("A"), pin("B")),
          outputs=(pin("大于", BOOL), pin("等于", BOOL), pin("小于", BOOL)),
-         keys="bijiao bj compare greater less equal 大于 小于"),
-    _compare_def("eq", "等于", "Equal (A = B)", "dengyu dy equal eq == 等于"),
+         keys="bijiao bj compare greater less equal 大于 小于",
+         tip="一次给出大于 / 等于 / 小于三个布尔输出，不用摆三张比较卡"),
+    _compare_def("eq", "等于", "Equal (A = B)", "dengyu dy equal eq == 等于",
+                 tip="A 等于 B 时输出真，浮点数按近似相等判断"),
     _compare_def("neq", "不等于", "Not Equal (A ≠ B)",
-                 "budengyu bdy neq != 不等于"),
-    _compare_def("gt", "大于", "Greater (A > B)", "dayu dg greater gt > 大于"),
+                 "budengyu bdy neq != 不等于", tip="A 与 B 不相等时输出真"),
+    _compare_def("gt", "大于", "Greater (A > B)", "dayu dg greater gt > 大于",
+                 tip="A 明显大于 B 时输出真（相等归给「等于」）"),
     _compare_def("gte", "大于等于", "Greater Or Equal (A ≥ B)",
-                 "dayudengyu ddy gte ge >= 大于等于 不少于"),
-    _compare_def("lt", "小于", "Less (A < B)", "xiaoyu xy less lt < 小于"),
+                 "dayudengyu ddy gte ge >= 大于等于 不少于",
+                 tip="A 达到或超过 B 时输出真"),
+    _compare_def("lt", "小于", "Less (A < B)", "xiaoyu xy less lt < 小于",
+                 tip="A 明显小于 B 时输出真（相等归给「等于」）"),
     _compare_def("lte", "小于等于", "Less Or Equal (A ≤ B)",
-                 "xiaoyudengyu xdy lte le <= 小于等于 不超过"),
+                 "xiaoyudengyu xdy lte le <= 小于等于 不超过",
+                 tip="A 不超过 B 时输出真"),
     defn("logic.and", "与", "AND", "逻辑", "and",
          inputs=(pin("A", ANY, True), pin("B", ANY, True)), outputs=(pin("结果", BOOL),),
-         keys="yu and 并且 且"),
+         keys="yu and 并且 且", tip="两个输入都为真时输出真"),
     defn("logic.or", "或", "OR", "逻辑", "or",
          inputs=(pin("A", ANY), pin("B", ANY)), outputs=(pin("结果", BOOL),),
-         keys="huo or 或者"),
+         keys="huo or 或者", tip="任一输入为真就输出真"),
     defn("logic.not", "非", "NOT", "逻辑", "not", inputs=(pin("值", ANY, True),),
-         outputs=(pin("结果", BOOL),), keys="fei not 取反"),
+         outputs=(pin("结果", BOOL),), keys="fei not 取反",
+         tip="真变假、假变真"),
     defn("logic.select", "选择", "Select", "逻辑", "select",
          inputs=(pin("条件", ANY, True), pin("为真时", FLOAT, 1.0), pin("为假时")),
-         outputs=(pin("结果"),), keys="xuanze xz select ternary 三元"),
+         outputs=(pin("结果"),), keys="xuanze xz select ternary 三元",
+         tip="条件为真输出「为真时」，否则输出「为假时」，只出数值不分流"),
 
     # ---- 流程 ----
     defn("flow.branch", "If-Else 分支", "Branch", "流程控制", "branch", exec_in=True,
          inputs=(pin("条件", ANY, True), pin("真值", FLOAT, 1.0), pin("假值")),
          outputs=(pin("满足", EXEC), pin("不满足", EXEC), pin("输出值")),
          keys="fenzhi fz branch if else 判断 条件 tiaojian",
-         tip="事件流里的一个节点块：执行流按条件分流，数值按条件选值"),
+         tip="执行流按条件走「满足」或「不满足」那一路，「输出值」跟着取真值 / 假值"),
     defn("flow.gate", "门控", "Gate", "流程控制", "gate", exec_in=True,
          inputs=(pin("打开", ANY, True),), outputs=(pin("通过", EXEC),),
-         keys="menkong gk gate 拦截 lanjie"),
+         keys="menkong gk gate 拦截 lanjie",
+         tip="「打开」为真才放行执行流，为假时后面的卡这一拍都不跑"),
     defn("flow.sequence", "序列", "Sequence", "流程控制", "sequence", exec_in=True,
          outputs=(pin("第一", EXEC), pin("第二", EXEC), pin("第三", EXEC)),
-         keys="xulie xl sequence 顺序 并行"),
+         keys="xulie xl sequence 顺序 并行",
+         tip="触发一次依次走第一 → 第二 → 第三，把一条流分成几段"),
 
     # ---- 变量 ----
     # 变量卡由右侧变量表拖出（var.read.<名> / var.write.<名>）：卡片本身就是即时
@@ -288,16 +329,20 @@ STATIC: list[dict[str, Any]] = [
     # ---- 实用 ----
     defn("util.reroute", "中继", "Reroute", "实用", "reroute",
          inputs=(pin("输入", ANY),), outputs=(pin("输出", ANY),),
-         keys="zhongji zj reroute 转发 跳线"),
+         keys="zhongji zj reroute 转发 跳线",
+         tip="原样转发数值，用来给连线拐弯、跨长距离走线"),
     defn("util.to_int", "转整数", "To Int", "实用", "to_int",
          inputs=(pin("输入", ANY),), outputs=(pin("整数", INT),),
-         keys="zhuan zhengshu convert int 数值化"),
+         keys="zhuan zhengshu convert int 数值化",
+         tip="把任意输入四舍五入成整数，接给只吃整数的引脚"),
     defn("util.to_bool", "转布尔", "To Bool", "实用", "to_bool",
          inputs=(pin("输入", ANY),), outputs=(pin("布尔", BOOL),),
-         keys="zhuan boer convert bool"),
+         keys="zhuan boer convert bool",
+         tip="把输入换成真 / 假：大于 0.5 即真"),
     defn("util.to_str", "转文本", "To String", "实用", "to_str",
          inputs=(pin("输入", ANY),), outputs=(pin("文本", STR),),
-         keys="zhuan wenben convert str 文本化"),
+         keys="zhuan wenben convert str 文本化",
+         tip="把输入格式化成文本输出，布尔会写成「真 / 假」"),
 ]
 
 PINYIN = {
@@ -320,6 +365,10 @@ _MISSING = defn("__missing__", "失效卡片", "Missing", "失效", "reroute",
                 tip="引用的参数或模块已下线")
 
 
+#: 核心参数在数据流线路里的简写：模块各自声明自己的（AIC / OSC…），核心统一这一个。
+CORE_SHORT = "CORE"
+
+
 def _core_write_defs() -> list[dict[str, Any]]:
     out = []
     for spec in core_inputs():
@@ -328,6 +377,7 @@ def _core_write_defs() -> list[dict[str, Any]]:
         out.append(defn(
             f"core.write.{key}", spec["label"], f"Write {key}", "核心写入",
             "core_write", page=PAGE_INPUT, exec_in=True, sink=True,
+            short=CORE_SHORT,
             inputs=(pin("值", ptype),), outputs=(pin("写入值", INT),),
             fields=(field("key", "参数", "text", default=key, pool="core_in"),),
             keys=f"{key} {spec.get('group','')} xieru",
@@ -347,7 +397,7 @@ def _core_read_defs(device_count: int) -> list[dict[str, Any]]:
                 seen.add(key)
                 out.append(defn(
                     f"core.read.{key}", spec["label"], f"Read {key}", "核心读出",
-                    "core_read", page=PAGE_OUTPUT,
+                    "core_read", page=PAGE_OUTPUT, short=CORE_SHORT,
                     outputs=(pin("值", spec_type(spec.get("type"))),),
                     fields=(field("key", "参数", "text", default=key,
                                   pool="core_out"),),
@@ -380,6 +430,12 @@ def _event_defs() -> list[dict[str, Any]]:
     ]
 
 
+def _strip_short(title: str, short: str) -> str:
+    """模块卡片标题带着「AIC · 本期掉血」这样的简写前缀，线路里只要后面那段。"""
+    prefix = f"{short} · "
+    return title[len(prefix):] if short and title.startswith(prefix) else title
+
+
 def _module_defs(modules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for mod in modules:
@@ -387,7 +443,10 @@ def _module_defs(modules: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not mid:
             continue
         mname = str(mod.get("name") or mid)
-        short = mname.replace("联动", "").replace("模块", "").strip() or mid
+        # 简写由模块自己声明（META["short"]）；没声明的老模块仍按名字猜一次。
+        short = (str(mod.get("short") or "").strip().upper()
+                 or mname.replace("联动", "").replace("模块", "").strip()
+                 or mid)
         base_keys = f"{mid} {mname} {short} mokuai mk"
         for row in _mod_pool(mod):
             name = row["name"]
@@ -403,6 +462,7 @@ def _module_defs(modules: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 out.append(defn(
                     f"mod.read.{mid}.{name}", title, f"Read {leaf}",
                     cat, "mod_read", page=PAGE_INPUT, palette=False,
+                    short=short,
                     outputs=(pin("值", ptype),),
                     fields=(field("module", "模块", "enum", default=mid,
                                   pool="module"),
@@ -414,6 +474,7 @@ def _module_defs(modules: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 out.append(defn(
                     f"mod.write.{mid}.{name}", title, f"Write {leaf}",
                     cat, "mod_write", page=PAGE_OUTPUT, exec_in=True,
+                    short=short,
                     sink=True, palette=False,
                     inputs=(pin("值", ptype),), outputs=(pin("写入值", ptype),),
                     fields=(field("module", "模块", "enum", default=mid,
@@ -531,6 +592,10 @@ class Catalog:
     def __init__(self):
         self._defs: dict[str, dict[str, Any]] = {}
         self._static: dict[str, dict[str, Any]] = {}
+        #: 每次重建 +1。界面上那些「按目录才画得出来」的东西（引脚、字段、卡片
+        #: 标题）不会跟着实时值那一轮走，只能靠这个数发现目录换了一版再去重取；
+        #: 设备连上后模块才登记出参数，画布上那几张卡原来就永远是一副空壳。
+        self.revision = 0
         for item in STATIC:
             self._static[item["key"]] = item
         self.refresh()
@@ -549,6 +614,7 @@ class Catalog:
             self._defs[item["key"]] = item
         for item in _var_defs(user_vars or []):
             self._defs[item["key"]] = item
+        self.revision += 1
 
     @property
     def defs(self) -> dict[str, dict[str, Any]]:
@@ -813,11 +879,44 @@ class FlowGraph:
             return False, "会形成数据环路"
         return True, ""
 
+    #: 类型接不上时自动插的转换卡：目标类型 → 卡片 key。
+    _AUTO_CONVERT = {BOOL: "util.to_bool", STR: "util.to_str",
+                     INT: "util.to_int", FLOAT: "util.to_int"}
+
+    def converter_for(self, src_type: str, dst_type: str) -> str:
+        """这对接不上的类型该插哪张转换卡；插不了的（执行流）返回空串。"""
+        if src_type == EXEC or dst_type == EXEC:
+            return ""
+        return self._AUTO_CONVERT.get(dst_type) or ""
+
     def connect(self, catalog: Catalog, src: FlowNode, src_index: int,
                 dst: FlowNode, dst_index: int) -> tuple[FlowWire | None, str]:
         ok, why = self.can_connect(catalog, src, src_index, dst, dst_index)
-        if not ok:
+        if ok:
+            return self._wire(catalog, src, src_index, dst, dst_index)
+        conv = ""
+        if why.startswith("类型不匹配"):
+            conv = self.converter_for(self.out_type(catalog, src, src_index),
+                                      self.in_type(catalog, dst, dst_index))
+        if not conv:
             return None, why
+        # 异类型不再直接拒绝：中间插一张转换卡，两条腿仍走 connect，
+        # 所以环路 / 单向输入这些判断一次都不跳过。
+        node = self.add_node(catalog, conv,
+                             (src.x + dst.x) / 2 + 12.0,
+                             (src.y + dst.y) / 2 + 46.0)
+        head, why1 = self.connect(catalog, src, src_index, node, 0)
+        if head is None:
+            self.remove_node(node)
+            return None, why1
+        tail, why2 = self.connect(catalog, node, 0, dst, dst_index)
+        if tail is None:
+            self.remove_node(node)
+            return None, why2
+        return tail, ""
+
+    def _wire(self, catalog: Catalog, src: FlowNode, src_index: int,
+              dst: FlowNode, dst_index: int) -> tuple[FlowWire | None, str]:
         st = self.out_type(catalog, src, src_index)
         old = self.wire_into(dst.id, dst_index)
         if old:
@@ -1215,6 +1314,18 @@ class _Tick:
         self.errors: dict[str, str] = {}
         self.owner: dict[str, FlowGraph] = {}
         self.written: list[str] = []
+        # 这一拍里「某个写入目标已经归谁、写的是什么值」：同拍不同值才是冲突。
+        self.writes: dict[str, tuple[str, Any]] = {}
+        # 这一拍里往某个目标写过值的卡片（含撞上的那几张）：冲突要一起标出来。
+        self.writers: dict[str, list[str]] = {}
+        self.conflict_nodes: set[str] = set()
+        self.conflict = ""
+        # 执行流走不到、界面要灰显的卡片；真正每拍还在写的常驻卡会被摘出去。
+        self.idle: set[str] = set()
+
+
+#: 一条卡片错误在画布上至少留几拍（一拍约 50 ms）：驱动没发的那几拍不该把红字抹掉。
+_ERROR_HOLD_BEATS = 30
 
 
 class FlowRuntime:
@@ -1254,6 +1365,14 @@ class FlowRuntime:
                                       "fired": 0, "written": 0}
         self.chain: list[str] = []
         self.errors: dict[str, str] = {}
+        # 执行流走不到的卡片（界面据此灰显）：每拍重算，接线一变就跟着变。
+        self.idle: list[str] = []
+        # 冲突卡片还剩几拍灰显：冲突只在触发拍出现，空拍不该让它一闪一闪。
+        self._idle_ttl: dict[str, int] = {}
+        # 已经写过日志的错误：同一条还在就别再刷日志（见 `_log_errors`）。
+        self._logged: set[str] = set()
+        # 每条错误还剩几拍可见（见 _collect）：驱动没发的那几拍不该把红字抹掉。
+        self._error_ttl: dict[str, int] = {}
         self.armed = True
 
     # ------------------------------------------------------------------ 配置
@@ -1355,14 +1474,15 @@ class FlowRuntime:
         return True
 
     def var_table(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """变量表两栏：(系统登记参数·不可改名, 可改名参数·含临时变量)。
+        """变量表两栏：(系统变量 · 模块登记的一切, 临时变量 · 用户自己登记)。
 
+        模块登记的参数全部走左栏，包括可改名的那一类（OSC 地址：名字改得，
+        类型与读写由模块定死）；右栏只剩用户在变量表里自己登记的变量——
+        「设备一连上就往临时变量里灌一堆」是这次要改掉的行为，设备参数要在
+        插件配置页登记过才算数。
         两栏都只认模块登记（link_params / temp_specs）：变量表是「模块 / 用户
         登记的变量」清单，核心自己的设备读数（COYOTE.StrengthA、Action 等）
         不算登记——它们在画布上是核心读数卡片，不进变量表占一行。
-        设备一连上参数就出现，不必等第一条数据到达；模块下线后它的登记行立刻
-        消失——模块写进共享值空间的残值不算登记，不回填进表里。
-        模块登记时标了 renamable 的行（如 OSC 头像参数）归入右栏，可改名。
         """
         values = self.value_space()
         user_names = {row["name"] for row in self.user_vars}
@@ -1378,16 +1498,18 @@ class FlowRuntime:
                           "source": str(item.get("source") or ""),
                           "renamable": bool(item.get("renamable")),
                           "value": values.get(name)}
-        system = sorted((row for row in rows.values() if not row["renamable"]),
-                        key=lambda r: r["name"])
-        module_rows = sorted((row for row in rows.values() if row["renamable"]),
-                             key=lambda r: r["name"])
-        user = [{"name": row["name"], "label": str(row.get("note") or ""),
-                 "dir": valid_var_dir(row.get("dir")), "type": "", "mid": "",
-                 "source": "临时变量", "renamable": True,
-                 "value": self.temps.get(row["name"])}
-                for row in self.user_vars]
-        return system, user + module_rows
+        # 左栏按模块聚在一起：同一模块的行连着排，模块之间按模块 id 排
+        # （id 是 ASCII，中文模块名按码位排会乱，用户找的是「这一家的参数都在一片」）。
+        system = sorted(rows.values(), key=lambda r: (r["mid"], r["name"]))
+        # 右栏是用户自己登记的，没有模块归属，按字母排。
+        user = sorted(
+            [{"name": row["name"], "label": str(row.get("note") or ""),
+              "dir": valid_var_dir(row.get("dir")), "type": "", "mid": "",
+              "source": "临时变量", "renamable": True,
+              "value": self.temps.get(row["name"])}
+             for row in self.user_vars],
+            key=lambda r: r["name"].casefold())
+        return system, user
 
     def var_clash(self, name: str) -> bool:
         """与系统登记参数或模块已写入的变量重名时算冲突。"""
@@ -1475,6 +1597,22 @@ class FlowRuntime:
             self.active = new
         return ""
 
+    def remove_profile(self, name: str) -> str:
+        """删掉一份配置并落盘，失败返回中文说明。
+
+        正在跑的那份不在这里删：切配置要连带重建驱动状态，那是宿主那条路的事，
+        由调用方先 `switch_profile` 再回来删。
+        """
+        if name not in self.profiles:
+            return f"没有配置「{name}」"
+        if len(self.profiles) <= 1:
+            return "至少要保留一份配置"
+        if self.active == name:
+            return "正在使用的配置不能删除，先切到别的配置"
+        del self.profiles[name]
+        self.save()
+        return ""
+
     def graph(self, page: str) -> FlowGraph:
         return self.graphs.get(page) or self.graphs[PAGE_INPUT]
 
@@ -1536,10 +1674,13 @@ class FlowRuntime:
             for node in graph.nodes:
                 ctx.owner[node.id] = graph
         self._prime_reads(ctx)
-        self._continuous_sinks(ctx, PAGE_OUTPUT)
+        reachable = self._exec_reachable(ctx)
+        driven = self._driven_targets(ctx, reachable)
+        ctx.idle = self._idle_nodes(ctx, reachable)
+        self._continuous_sinks(ctx, PAGE_OUTPUT, driven, reachable)
         fired = self._eval_drivers(ctx)
         self._walk_exec(ctx, fired)
-        self._continuous_sinks(ctx, PAGE_INPUT)
+        self._continuous_sinks(ctx, PAGE_INPUT, driven, reachable)
         self._collect(ctx)
         return self.stats
 
@@ -1833,6 +1974,244 @@ class FlowRuntime:
                     break
         return expr.clamp_int(value, int(low), int(high))
 
+    def _write_target(self, ctx: _Tick, node: FlowNode) -> str:
+        """这张写入卡管的是哪个目标；参数没选就是空串。"""
+        item = ctx.catalog.definition(node.def_key)
+        op = item["op"]
+        if op == "core_write":
+            key = str(node.param(ctx.catalog, "key") or "")
+            return f"核心参数 {key}" if key else ""
+        if op == "mod_write":
+            mid = str(node.param(ctx.catalog, "module") or "")
+            name = str(node.param(ctx.catalog, "name") or "")
+            return f"模块参数 {mid}.{name}" if mid and name else ""
+        if op == "temp_write":
+            name = str(node.param(ctx.catalog, "name") or "").strip()
+            return f"变量 {name}" if name else ""
+        return ""
+
+    def _exec_reachable(self, ctx: _Tick) -> set[str]:
+        """执行流从驱动卡出发能走到的卡片。
+
+        只看「接没接执行线」会认错人：分支自己没接驱动时，它下面那一串线连得齐齐
+        的卡片这一拍也永远走不到，反而是它们失效；直连驱动的那张才是真正在写的。
+        """
+        found: set[str] = set()
+        stack: list[tuple[FlowGraph, FlowNode]] = []
+        for page in PAGES:
+            graph = self.graphs.get(page)
+            if graph is None:
+                continue
+            for node in graph.nodes:
+                if ctx.catalog.definition(node.def_key)["entry"]:
+                    found.add(node.id)
+                    stack.append((graph, node))
+        while stack:
+            graph, node = stack.pop()
+            for index, out in enumerate(node.outputs(ctx.catalog)):
+                if out["type"] != EXEC:
+                    continue
+                for wire in graph.wires_from(node.id, index):
+                    target = graph.find(wire.dst[0])
+                    if target is None or target.id in found:
+                        continue
+                    found.add(target.id)
+                    stack.append((graph, target))
+        return found
+
+    def _idle_nodes(self, ctx: _Tick, reachable: set[str]) -> set[str]:
+        """要灰显的卡片：带执行入口、可执行流走不到它。
+
+        分支 / 序列这类只管分流的说一句「无连线」就够了；写入卡另有判断（目标没人管
+        时它照旧每拍顶着值），由 `_continuous_sinks` 定，所以这里先不给它写注释。
+        """
+        idle: set[str] = set()
+        for page in PAGES:
+            graph = self.graphs.get(page)
+            if graph is None:
+                continue
+            for node in graph.nodes:
+                item = ctx.catalog.definition(node.def_key)
+                if not item["exec_in"] or node.id in reachable:
+                    continue
+                idle.add(node.id)
+                if not item["sink"]:
+                    ctx.errors[node.id] = "无连线：这张卡没有执行流走到，不会触发"
+        return idle
+
+    # ------------------------------------------------------------ 数据流探测
+    #: 只换值不改线路归属的中间卡：探测时顺着走，别把一条线拆成两段。
+    _FLOW_THROUGH = {"reroute", "to_int", "to_bool", "to_str"}
+
+    def _flow_sources(self, graph: FlowGraph, node: FlowNode, index: int,
+                      catalog: Catalog, depth: int = 0) -> list[dict[str, Any]]:
+        """某个输入脚上的数据最终取自哪些「端点」。"""
+        wire = graph.wire_into(node.id, index)
+        if wire is None or depth > 8:
+            return []
+        up = graph.find(wire.src[0])
+        if up is None:
+            return []
+        return self._flow_from(graph, up, wire.src[1], catalog, depth)
+
+    def _flow_from(self, graph: FlowGraph, node: FlowNode, index: int,
+                   catalog: Catalog, depth: int) -> list[dict[str, Any]]:
+        item = catalog.definition(node.def_key)
+        op = item["op"]
+        if op in self._FLOW_THROUGH:
+            return self._flow_sources(graph, node, 0, catalog, depth + 1)
+        if op == "formula":
+            ends: list[dict[str, Any]] = []
+            for pin_index in (0, 1):
+                ends.extend(self._flow_sources(graph, node, pin_index,
+                                               catalog, depth + 1))
+            return ends
+        if op == "free_expr":
+            text = str(node.param(catalog, "expr") or "")
+            ends = []
+            for token in re.findall(r"\{([^{}]+)\}", text):
+                end = self._flow_named(catalog, token.strip())
+                if end is not None:
+                    ends.append(end)
+            return ends
+        return [{"op": op, "title": str(item["title"] or ""),
+                 "short": str(item.get("short") or "")}]
+
+    def _flow_named(self, catalog: Catalog, name: str) -> dict[str, Any] | None:
+        """自由公式里的变量名 → 它归哪一端（核心读出 / 某个模块的读数卡）。"""
+        if not name:
+            return None
+        direct = catalog.definition(f"core.read.{name}")
+        if direct["op"] == "core_read":
+            return {"op": "core_read", "title": str(direct["title"] or name),
+                    "short": CORE_SHORT}
+        suffix = f".{name}"
+        for key, item in catalog.defs.items():
+            if item["op"] == "mod_read" and key.endswith(suffix):
+                return {"op": "mod_read",
+                        "title": _strip_short(str(item["title"] or name),
+                                              str(item.get("short") or "")),
+                        "short": str(item.get("short") or "")}
+        return None
+
+    def _flow_label(self, catalog: Catalog, node: FlowNode,
+                    def_key: str) -> dict[str, Any]:
+        """写入卡真正写的那个参数的名字与简写（卡片可能被改成了别的参数）。"""
+        item = catalog.definition(def_key)
+        if not catalog.known(def_key):
+            item = catalog.definition(node.def_key)
+        return {"title": str(item["title"] or node.def_key),
+                "short": str(item.get("short") or "")}
+
+    def data_flow(self) -> list[dict[str, Any]]:
+        """画布上「模块 ↔ 核心」之间已经连好的数据线路。
+
+        概览页那张探测卡只报两类：模块传出 → 核心写入、核心传出 → 模块写入。
+        一条线在设备上就是一个值，所以公式摊开后只报第一个变量，其余以 `count`
+        告诉界面「等 N 个」。
+        """
+        catalog = self.catalog
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for page in PAGES:
+            graph = self.graphs.get(page)
+            if graph is None:
+                continue
+            for node in graph.nodes:
+                item = catalog.definition(node.def_key)
+                op = item["op"]
+                if op not in ("core_write", "mod_write"):
+                    continue
+                ends = [end for end in self._flow_sources(graph, node, 0, catalog)
+                        if end["op"] in ("mod_read", "core_read")]
+                if not ends:
+                    continue
+                if op == "core_write":
+                    kind, want = "to_core", "mod_read"
+                    params = node.params
+                    core = self._flow_label(
+                        catalog, node,
+                        f"core.write.{params.get('key') or ''}")
+                    others = [e for e in ends if e["op"] == want]
+                else:
+                    kind, want = "from_core", "core_read"
+                    core = dict(ends[0]) if ends[0]["op"] == want else None
+                    if core is None:
+                        continue
+                    params = node.params
+                    others = [self._flow_label(
+                        catalog, node,
+                        "mod.write.%s.%s" % (params.get("module") or "",
+                                             params.get("name") or ""))]
+                if not others:
+                    continue
+                other = others[0]
+                row = {
+                    "kind": kind,
+                    "core": _strip_short(core["title"], core["short"]),
+                    "coreShort": CORE_SHORT,
+                    "other": _strip_short(other["title"], other["short"]),
+                    "otherShort": other["short"],
+                    "count": len(others) if kind == "to_core" else len(ends),
+                }
+                tag = (row["kind"], row["core"], row["other"], row["otherShort"])
+                if tag in seen:
+                    continue
+                seen.add(tag)
+                rows.append(row)
+        return rows
+
+    def _driven_targets(self, ctx: _Tick, reachable: set[str]) -> set[str]:
+        """被「执行流走得到的」写入卡管着的目标名。
+
+        同一个参数一旦有执行流上的卡片在写，走不到的那张就彻底让位——它以前每拍
+        都写一次，会在驱动没发的那几拍里把值盖回去（用户看到的「该写 0 却写了 1」）。
+        """
+        driven: set[str] = set()
+        for page in PAGES:
+            graph = self.graphs.get(page)
+            if graph is None:
+                continue
+            for node in graph.nodes:
+                if node.id not in reachable:
+                    continue
+                item = ctx.catalog.definition(node.def_key)
+                if not item["sink"] or not item["exec_in"]:
+                    continue
+                target = self._write_target(ctx, node)
+                if target:
+                    driven.add(target)
+        return driven
+
+    def _claim_write(self, ctx: _Tick, node: FlowNode, target: str,
+                     value: Any) -> bool:
+        """这一拍这个目标让不让这张卡写；False = 不写（跳过或报冲突）。
+
+        同一个值被两张卡算出来不算冲突（本来就会被去重）；同一条执行流上用**不同的值**
+        写同一个目标才是真冲突——后写的会盖掉先写的，设备上就是值来回跳。这时撞上的
+        那几张卡一起标出来（红字 + 灰显），用户一眼能看出是哪几写在抢同一个参数。
+        """
+        held = ctx.writes.get(target)
+        writers = ctx.writers.setdefault(target, [])
+        if held is None:
+            ctx.writes[target] = (node.id, value)
+            writers.append(node.id)
+            return True
+        if held[0] == node.id or _same_number(held[1], value):
+            if node.id not in writers:
+                writers.append(node.id)
+            return True
+        if node.id not in writers:
+            writers.append(node.id)
+        message = (f"写入冲突：同一执行流里有卡片用不同的值写「{target}」，"
+                   f"这几张卡本拍都不写入")
+        for writer in writers:
+            ctx.errors[writer] = message
+            ctx.conflict_nodes.add(writer)
+        if not ctx.conflict:
+            ctx.conflict = target
+        return False
+
     def _write_core(self, ctx: _Tick, node: FlowNode, raw: Any) -> None:
         key = str(node.param(ctx.catalog, "key") or "")
         if not key:
@@ -1841,6 +2220,8 @@ class FlowRuntime:
         value = self._core_value(ctx, node, raw)
         node.live = [value]
         ctx.memo[(node.id, 0)] = value
+        if not self._claim_write(ctx, node, f"核心参数 {key}", value):
+            return
         if key not in self._periodic and self._last_core.get(key) == value:
             return
         self._last_core[key] = value
@@ -1850,7 +2231,7 @@ class FlowRuntime:
             self._emit_core(key, value)
             ctx.written.append(key)
         except Exception as exc:
-            ctx.errors[node.id] = f"派发失败: {exc!r}"
+            ctx.errors[node.id] = f"派发失败：{exc!r}"
 
     def _write_module(self, ctx: _Tick, node: FlowNode, raw: Any) -> None:
         mid = str(node.param(ctx.catalog, "module") or "")
@@ -1861,6 +2242,8 @@ class FlowRuntime:
         value = as_float(raw)
         node.live = [value]
         ctx.memo[(node.id, 0)] = value
+        if not self._claim_write(ctx, node, f"模块参数 {mid}.{name}", value):
+            return
         if self._last_module.get((mid, name)) == value:
             return
         self._last_module[(mid, name)] = value
@@ -1870,7 +2253,7 @@ class FlowRuntime:
             self._emit_module(mid, name, value)
             ctx.written.append(f"{mid}.{name}")
         except Exception as exc:
-            ctx.errors[node.id] = f"写入失败: {exc!r}"
+            ctx.errors[node.id] = f"写入失败：{exc!r}"
 
     def _write_temp(self, ctx: _Tick, node: FlowNode, raw: Any) -> None:
         name = str(node.param(ctx.catalog, "name") or "").strip()
@@ -1881,6 +2264,8 @@ class FlowRuntime:
             node.error = "未命名"
             return
         node.error = ""
+        if not self._claim_write(ctx, node, f"变量 {name}", value):
+            return
         self.temps[name] = value
         ctx.values[name] = value
         ctx.written.append(f"变量 {name}")
@@ -1945,24 +2330,63 @@ class FlowRuntime:
             if target is not None:
                 self._run(ctx, target)
 
-    def _continuous_sinks(self, ctx: _Tick, page: str) -> None:
+    def _continuous_sinks(self, ctx: _Tick, page: str,
+                          driven: set[str] | None = None,
+                          reachable: set[str] | None = None) -> None:
         graph = self.graphs.get(page)
         if graph is None:
             return
+        live = reachable if reachable is not None else self._exec_reachable(ctx)
+        owned = driven if driven is not None else self._driven_targets(ctx, live)
         for node in graph.nodes:
             item = ctx.catalog.definition(node.def_key)
             if not item["sink"] or not item["exec_in"]:
                 continue
-            if graph.wires_into(node.id, -1):
+            if node.id in live:
                 continue
             if node.id in ctx.exec_seen:
                 continue
+            target = self._write_target(ctx, node)
+            if not target:
+                node.error = "未选择要写的参数"
+                continue
+            if target in owned:
+                # 同一个参数已经有执行流上的卡在管：这张走不到的不再每拍补写。
+                ctx.errors[node.id] = (f"无连线：这张卡没有执行流走到，"
+                                       f"「{target}」由执行流上的卡片写入")
+                ctx.idle.add(node.id)
+                continue
+            # 目标没人管：这张虽然接不到执行流，仍是它每拍顶着值，不算失效。
+            ctx.idle.discard(node.id)
             self._sink_write(ctx, node)
 
     # ---------------------------------------------------------------- 快照
     def _collect(self, ctx: _Tick) -> None:
-        self.errors = dict(ctx.errors)
+        # 错误要能留住几拍：冲突只在「事件真的发的那一拍」出现，驱动周期 100 ms
+        # 时大部分拍次是空的，逐拍覆盖会让卡片上的红字一闪一闪，看着像界面坏了。
+        fresh = dict(ctx.errors)
+        for node_id, message in fresh.items():
+            self._error_ttl[node_id] = _ERROR_HOLD_BEATS
+        for node_id in list(self._error_ttl):
+            if node_id in fresh:
+                continue
+            self._error_ttl[node_id] -= 1
+            if self._error_ttl[node_id] <= 0:
+                del self._error_ttl[node_id]
+        held = {k: self.errors[k] for k in self._error_ttl if k in self.errors}
+        self.errors = {**held, **fresh}
         self.chain = ctx.chain[:24]
+        # 冲突只在触发那一拍算得出来，灰显要跟红字一样留几拍，不然空拍上会一闪一闪。
+        for node_id in ctx.conflict_nodes:
+            self._idle_ttl[node_id] = _ERROR_HOLD_BEATS
+        for node_id in list(self._idle_ttl):
+            if node_id in ctx.conflict_nodes:
+                continue
+            self._idle_ttl[node_id] -= 1
+            if self._idle_ttl[node_id] <= 0:
+                del self._idle_ttl[node_id]
+        self.idle = sorted(ctx.idle | set(self._idle_ttl))
+        self._log_errors()
         for page in PAGES:
             graph = self.graphs[page]
             for wire in graph.wires:
@@ -1972,6 +2396,18 @@ class FlowRuntime:
         self.stats = {"nodes": total_nodes, "wires": total_wires,
                       "steps": ctx.steps, "fired": len(ctx.exec_seen),
                       "written": len(ctx.written)}
+
+    def _log_errors(self) -> None:
+        """卡片上的错误全文只往引擎日志写，同一条只写一次。
+
+        卡片只留「无连线 / 写入冲突」这种短标签，完整那句进日志。但冲突每拍都算得
+        出来（驱动 100 ms 时更是刷屏），所以按「这条错误还在不在」记账：还在就不再
+        写，等它从清单里消失（用户接好了线）之后再犯才算新的一次。
+        """
+        live = set(self.errors.values())
+        for message in sorted(live - self._logged):
+            self.log(message)
+        self._logged = live
 
     def reset(self) -> None:
         self._last_core.clear()

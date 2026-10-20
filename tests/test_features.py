@@ -60,7 +60,9 @@ class V4ContinuousWaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(client.monitors["s1"].samples), 10)
         _t, a, b = client.monitors["s1"].samples[0]
         self.assertEqual(len(a), 4)
-        self.assertEqual(b, (0, 0, 0, 0))
+        # 另一条通道留空，不再补四个 0：补零会让 A、B 两批样本交错落在同一时刻，
+        # 界面按样本间隔算格子宽度时算出「半帧」，柱子挤在一起互相盖掉（吞波形）。
+        self.assertEqual(b, ())
 
         await client.clear_wave("A", slot_id="s1")
         sent.clear()
@@ -363,22 +365,21 @@ class BleFeatureTests(unittest.IsolatedAsyncioTestCase):
 
 class OvcButtonBindingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        # 每个用例一个独立目录：按键映射落 `<配置目录>/config/bindings`，
+        # 共用同一个文件名时上一用例留下的活动配置档会串到下一条里。
+        self._home = tempfile.mkdtemp(prefix="dgstudio-ovc-")
+
+    def tearDown(self):
         import shutil
 
-        # 按键映射配置现在落 tempdir/config/bindings 文件夹，先清干净防串场
-        shutil.rmtree(os.path.join(tempfile.gettempdir(), "config", "bindings"),
-                      ignore_errors=True)
-        path = os.path.join(tempfile.gettempdir(), "dgstudio_test_ovc_button.json")
-        if os.path.exists(path):
-            os.remove(path)
+        shutil.rmtree(self._home, ignore_errors=True)
 
     def _engine(self):
         import app as app_module
 
         # 用独立配置文件：这些用例要写按键映射配置，不能碰仓库里的真实配置
         engine = app_module.Engine(
-            config_path=os.path.join(tempfile.gettempdir(),
-                                     "dgstudio_test_ovc_button.json"))
+            config_path=os.path.join(self._home, "config.json"))
         engine.start()
         return engine
 
@@ -917,6 +918,27 @@ class FrameLogTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WaveMonitorThreadTests(unittest.TestCase):
+    def test_window_holds_a_v4_five_second_span(self):
+        """v4 一次批 10 帧、A/B 两条通道交错，5 秒窗口里有 250 多份样本。
+
+        容量按 160 给的话最老的几帧会被挤掉，画出来就是波形缺一段（用户说的「吞波形」
+        之一）；另一条通道补零也会让帧间隔算成半帧，所以交错时只有一侧带子段。
+        """
+        import time as _time
+
+        from dglab.monitor import WaveMonitor
+
+        monitor = WaveMonitor()
+        now = _time.monotonic()
+        for i in range(300):
+            at = now - 5.0 + i * (5.0 / 300)
+            a, b = ([40, 60, 80, 20], []) if i % 2 == 0 else ([], [10, 30, 50, 70])
+            monitor.record_at(at, a, b)
+        rows = monitor.window(5.0)
+        self.assertGreaterEqual(len(rows), 290,
+                                "容量太小，最老的帧被挤掉了")
+        self.assertTrue(all(r[1] or r[2] for r in rows), "每帧至少有一条通道的子段")
+
     def test_window_during_record_never_raises(self):
         import threading
         import time as _time
@@ -952,30 +974,7 @@ class WaveMonitorThreadTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
-class LogBufferMirrorTests(unittest.TestCase):
-    def test_ui_messages_mirror_engine_messages_do_not(self):
-        from ui.live import LogBuffer
-
-        buffer = LogBuffer()
-        mirrored: list[str] = []
-        buffer.mirror = mirrored.append
-        buffer.append("ui-msg")
-        buffer.append("engine-msg", from_engine=True)
-        self.assertEqual(mirrored, ["ui-msg"])
-        self.assertEqual(buffer.snapshot()[-1][2], "engine-msg")
-
-
 class OvcBindingActionTableTests(unittest.IsolatedAsyncioTestCase):
-    def test_button_actions_match_engine(self):
-        import app as app_module
-
-        from ui import live
-
-        self.assertEqual(tuple(k for k, _ in live.BUTTON_ACTIONS),
-                         app_module.Engine._OVC_BUTTON_ACTIONS)
-        self.assertEqual(live.button_actions(engine=None)[-1][0], "key")
-
-
     async def test_binding_strength_single_channel(self):
         import app as app_module
 
@@ -1151,6 +1150,45 @@ class DeviceSettingTests(unittest.IsolatedAsyncioTestCase):
         finally:
             engine.stop()
 
+    async def test_ovc_numeric_params_round_to_ten(self):
+        from bridge.server import intensity_rows
+
+        engine = self._engine()
+        try:
+            class FakeV4(SocketV4Client):
+                async def set_strength(self, channel, value, slot_id=None):
+                    pass
+
+            backend = FakeV4(events=StateEvents())
+            backend._replace_devices("app", [{"slotId": "ovc1", "type": "OVC_1"}])
+            engine._backend = backend
+            for key, raw, want in (("max_strength", 43, 40),
+                                   ("max_strength", 3, 10),
+                                   ("fire_strength_a", 47, 50),
+                                   ("fire_strength_b", 0, 0),
+                                   ("strength_step", 4, 10)):
+                engine.set_intensity_param(key, raw, slot_id="ovc1")
+                self.assertEqual(engine.intensity_params("ovc1")[key], want,
+                                 f"{key} 写入 {raw}")
+            ovcRows = {r["key"]: r for r in intensity_rows(engine, "ovc1")}
+            self.assertEqual(ovcRows["max_strength"]["step"], 10)
+            self.assertEqual(ovcRows["fire_duration_s"]["step"], 0.1)
+            # 参数名要和原版一致：AB 通道开火强度，不是触发电平
+            labels = {r["key"]: r["label"] for r in ovcRows.values()}
+            self.assertEqual(labels["fire_strength_a"], "A 通道开火强度")
+            self.assertEqual(labels["fire_strength_b"], "B 通道开火强度")
+            self.assertEqual(labels["fire_strength"], "开火强度")
+            self.assertNotIn("电平", "".join(labels.values()))
+            # 郊狼仍然按原值走，10 的格子只属于负鼠
+            backend._replace_devices("app", [{"slotId": "ovc1", "type": "COYOTE_030"}])
+            engine.set_intensity_param("max_strength", 43, slot_id="ovc1")
+            self.assertEqual(engine.intensity_params("ovc1")["max_strength"], 43)
+            self.assertEqual(
+                {r["key"]: r for r in intensity_rows(engine, "ovc1")}
+                ["max_strength"]["step"], 1)
+        finally:
+            engine.stop()
+
     async def test_emergency_stop_zeros_and_resets_wave(self):
         engine = self._engine()
         try:
@@ -1249,6 +1287,174 @@ class DeviceSettingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(waves[-1], ("A", SILENT))
         finally:
             engine.stop()
+
+
+class MultiChannelEngineTests(unittest.IsolatedAsyncioTestCase):
+    """三条通道可以并存：状态合并、指令按槽位回到持有它的后端。"""
+
+    def _engine(self):
+        import os
+        import tempfile
+
+        import app as app_module
+
+        path = os.path.join(tempfile.gettempdir(), "dglab_test_multichannel_cfg.json")
+        if os.path.exists(path):
+            os.remove(path)
+        engine = app_module.Engine(config_path=path)
+        engine.start()
+        return engine
+
+    @staticmethod
+    def _fake(backend, slots):
+        import types
+        from dglab.state import EngineState, Slot
+
+        state = EngineState(backend=backend, connected=True, status_text="已连接",
+                            slots={sid: Slot(slot_id=sid, type=dev) for sid, dev in slots.items()})
+        return types.SimpleNamespace(state=state, closed=False)
+
+    async def test_state_merges_slots_from_every_channel(self):
+        import types
+
+        engine = self._engine()
+        try:
+            v4 = self._fake("v4", {"s1": "COYOTE_030"})
+            ble = self._fake("ble", {"AA:BB": "OVC-1", "CC:DD": "BMTR-1"})
+
+            async def _noop(_self):
+                _self.closed = True
+            v4.disconnect = types.MethodType(_noop, v4)
+            ble.disconnect = types.MethodType(_noop, ble)
+
+            engine._adopt("v4", v4)
+            engine._adopt("ble", ble)
+            state = engine.get_state()
+            self.assertEqual(sorted(state.slots), ["AA:BB", "CC:DD", "s1"])
+            self.assertTrue(state.connected)
+            # 主用是最后连上的那条通道，顶栏的 backend 字段跟着它走。
+            self.assertEqual(state.backend, "ble")
+            rows = {r["key"]: r for r in engine.channel_states()}
+            self.assertTrue(rows["v4"]["connected"] and rows["ble"]["connected"])
+            self.assertFalse(rows["v4"]["primary"])
+            self.assertTrue(rows["ble"]["primary"])
+            self.assertEqual(rows["v3"]["status_text"], "未连接")
+
+            self.assertIs(engine._require_backend("s1"), v4)
+            self.assertIs(engine._require_backend("AA:BB"), ble)
+            self.assertIs(engine._require_backend(), ble)
+        finally:
+            engine.stop()
+
+    async def test_disconnecting_one_channel_keeps_the_other(self):
+        import types
+
+        engine = self._engine()
+        try:
+            v4 = self._fake("v4", {"s1": "COYOTE_030"})
+            ble = self._fake("ble", {"AA:BB": "OVC-1"})
+
+            async def _close(_self):
+                _self.closed = True
+            v4.disconnect = types.MethodType(_close, v4)
+            ble.disconnect = types.MethodType(_close, ble)
+
+            engine._adopt("v4", v4)
+            engine._adopt("ble", ble)
+            await engine.disconnect_channel("v4")
+
+            self.assertTrue(v4.closed)
+            self.assertFalse(ble.closed)
+            self.assertEqual(sorted(engine.get_state().slots), ["AA:BB"])
+            self.assertIs(engine._backend, ble)
+            self.assertEqual(engine.backend_kind, "ble")
+        finally:
+            engine.stop()
+
+    async def test_disconnecting_the_only_channel_clears_present(self):
+        """断开唯一那条通道以后，`present` 必须跟着落回 False。
+
+        `_release` 以前先取 `active_channels()` 再挪指针，而那个刚释放的后端还挂在
+        `_backend` 上，被兜底按通道补了回来——自己把自己重新认成主用，断开以后
+        概览上那条通道一直显示「等待客户端」，日志里却早就写了「通道已断开」。
+        """
+        import types
+
+        engine = self._engine()
+        try:
+            v4 = self._fake("v4", {"s1": "COYOTE_030"})
+
+            async def _close(_self):
+                _self.closed = True
+            v4.disconnect = types.MethodType(_close, v4)
+
+            engine._adopt("v4", v4)
+            rows = {r["key"]: r for r in engine.channel_states()}
+            self.assertTrue(rows["v4"]["present"], "断开前这条通道确实有客户端")
+
+            await engine.disconnect_channel("v4")
+            rows = {r["key"]: r for r in engine.channel_states()}
+            self.assertTrue(v4.closed)
+            self.assertFalse(rows["v4"]["present"], "断开后不该还报「等待客户端」")
+            self.assertFalse(rows["v4"]["primary"])
+            self.assertFalse(rows["v4"]["connected"])
+            self.assertIsNone(engine._backend)
+            self.assertEqual(engine.backend_kind, "none")
+            self.assertFalse(engine.get_state().connected)
+        finally:
+            engine.stop()
+
+
+class FlowNodesMoveTests(unittest.TestCase):
+    """「整理布局」的坐标要当场落盘。
+
+    模块装载那条路会重新读一遍事件流配置文件，界面上的延时保存在它之后才写：
+    整理好的坐标被旧的一份盖回去，用户看到的就是「整理了，一刷新又乱了」。
+    """
+
+    def test_batch_move_writes_through_to_disk(self):
+        import io
+        import shutil
+        import json
+        import types
+
+        import dglab.event_flow as ef
+        from bridge import flow as bf
+
+        tmp = tempfile.mkdtemp()
+        try:
+            runtime = ef.FlowRuntime(base_dir=tmp)
+            runtime.load()
+            graph = runtime.graph("input")
+            first = graph.add_node(runtime.catalog, "var.const_float", 900.0, 700.0)
+            second = graph.add_node(runtime.catalog, "var.const_float", 900.0, 800.0)
+
+            class _Flow:
+                def missing_modules(self):
+                    return []
+
+            flow = _Flow()
+            flow.runtime, flow.catalog = runtime, runtime.catalog
+            engine = types.SimpleNamespace(flow=flow)
+
+            reply = bf.nodes_move(engine, {"page": "input", "moves": {
+                first.id: [40.0, 40.0], second.id: [40.0, 160.0]}})
+
+            self.assertEqual([round(n["x"], 1) for n in reply["graph"]["nodes"]],
+                             [40.0, 40.0], "回包里就该是整理后的坐标")
+            with io.open(os.path.join(tmp, "config", "event_flow", "默认.json"),
+                         encoding="utf-8") as handle:
+                stored = json.load(handle)
+            self.assertEqual(sorted(round(n["x"], 1) for n in stored["graphs"]["input"]["nodes"]),
+                             [40.0, 40.0], "不等界面延时保存，方法自己就要落盘")
+
+            # 模块装载会重读配置文件：读回来的必须还是整理后的那一份。
+            reloaded = ef.FlowRuntime(base_dir=tmp)
+            reloaded.load()
+            self.assertEqual(sorted(round(n.x, 1) for n in reloaded.graph("input").nodes),
+                             [40.0, 40.0])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

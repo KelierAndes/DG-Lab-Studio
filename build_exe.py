@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -14,10 +15,13 @@ from dglab.version import APP_VERSION
 
 ROOT = Path(__file__).resolve().parent
 APP_DIR = ROOT / "dist" / "DGStudio"
+FLUTTER_RELEASE = ROOT / "flutter" / "build" / "windows" / "x64" / "runner" / "Release"
 RUNTIME_FILES = ("config.json", "dgstudio.log")
 RUNTIME_DIRS = ("config",)
 
-RELEASE_KEEP_TOP = {"DGStudio.exe", "_internal", "_python", "modules"}
+# 随包的东西 = 外壳（DGStudio.exe + data/ + 各插件 DLL）+ 侧车（DGStudio-bridge.exe
+# + _internal/）+ 内置 Python 与随包模块；开发机上留在 dist 里的用户数据不进 zip。
+RELEASE_SKIP_TOP = {*RUNTIME_FILES, *RUNTIME_DIRS}
 RELEASE_KEEP_MODULES = {"__init__.py", "config_init"}
 
 
@@ -28,6 +32,24 @@ def main() -> int:
         version = sys.argv[sys.argv.index("--version") + 1]
     if not check_bundled_wheels(ROOT / "modules",
                                 allow_stale="--allow-stale-wheels" in sys.argv):
+        return 2
+    # 外壳先编：flutter 构建失败时不该已经把 dist 里的侧车删了。
+    if "--skip-flutter" not in sys.argv:
+        # 先删资产中间产物：`flutter build` 增量时不重跑资源打包，
+        # 图标字体那份「按需裁剪」的子集就会一直是旧的了——新加的 Icons.*
+        # 在成品里渲染成空白方块（界面上看着像按钮没图标）。
+        for stale in (ROOT / "flutter" / "build" / "flutter_assets",
+                      FLUTTER_RELEASE / "data" / "flutter_assets"):
+            if stale.is_dir():
+                shutil.rmtree(stale)
+        # Windows 上 flutter 是 .bat 包装，CreateProcess 不认，只能走 shell。
+        code = subprocess.call("flutter build windows --release",
+                               cwd=ROOT / "flutter", shell=True)
+        if code != 0:
+            print(f"flutter build failed (exit {code})")
+            return code
+    if not (FLUTTER_RELEASE / "DGStudio.exe").is_file():
+        print(f"flutter shell missing: {FLUTTER_RELEASE / 'DGStudio.exe'}")
         return 2
     backup_dir = ROOT / "_research" / "_runtime_backup"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -54,13 +76,14 @@ def main() -> int:
     stash_modules(APP_DIR / "modules", backup_dir / "modules_backup")
 
     try:
-        cmd = [sys.executable, "-m", "PyInstaller", "DGStudio.spec",
+        cmd = [sys.executable, "-m", "PyInstaller", "DGStudio-bridge.spec",
                "--noconfirm"]
         code = subprocess.call(cmd, cwd=ROOT)
         if code != 0:
             print(f"build failed (exit {code})")
             return code
 
+        copy_flutter_shell(FLUTTER_RELEASE, APP_DIR)
         copy_modules(ROOT / "modules", APP_DIR / "modules")
         merge_downloaded(APP_DIR / "modules", ROOT / "modules",
                          backup_dir / "modules_backup")
@@ -127,6 +150,29 @@ def merge_downloaded(live: Path, bundled_dir: Path, backup: Path) -> None:
         print(f"restored {restored} downloaded module(s) into modules/")
 
 
+def copy_flutter_shell(release_dir: Path, app_dir: Path) -> None:
+    """把 Flutter 外壳整个盖到 dist 上：DGStudio.exe、data/ 与插件 DLL。
+
+    侧车与外壳必须同目录——引擎按 `sys.executable` 所在目录找 config.json、
+    modules/ 与 _python/，而 `DGStudio-bridge.exe` 的 `_internal/` 也在这里。
+    """
+    if not release_dir.is_dir():
+        raise SystemExit(f"flutter release dir missing: {release_dir}")
+    count = 0
+    for src in sorted(release_dir.iterdir()):
+        if not src.is_file() and src.name != "data":
+            continue
+        dst = app_dir / src.name
+        if src.is_dir():
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+        count += 1
+    print(f"flutter shell -> {app_dir} ({count} entries)")
+
+
 def copy_modules(src: Path, dst: Path) -> None:
     if not src.is_dir():
         print(f"modules/ missing, skip copy: {src}")
@@ -163,7 +209,7 @@ def make_release_zip(app_dir: Path, version: str) -> Path:
             if path.is_dir() or "__pycache__" in path.parts:
                 continue
             parts = path.relative_to(app_dir.parent).parts
-            if parts[1] not in RELEASE_KEEP_TOP:
+            if len(parts) < 2 or parts[1] in RELEASE_SKIP_TOP:
                 continue
             if (parts[1] == "modules"
                     and (len(parts) < 3

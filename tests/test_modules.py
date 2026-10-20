@@ -207,6 +207,26 @@ class ModuleDiscoveryTests(unittest.TestCase):
         self.assertIn("carrier", ids)
         self.assertIn("logic", ids)
 
+    def test_delete_module_takes_the_file_and_the_enabled_flag(self):
+        """卸载 = 文件与启用标记一起走。
+
+        标记留在 modules.json 里，下次开机就去加载一个已经不存在的模块；
+        列表里那条还留着，用户看到的就是「点了卸载没反应」。
+        """
+        self.manager.set_enabled("actor", True)
+        path = self.manager.module_dir("actor")
+        self.assertTrue(path and os.path.isdir(path))
+        self.manager.delete_module("actor")
+        self.assertNotIn("actor", {m["id"] for m in self.manager.list_modules()})
+        self.assertNotIn("actor", self.manager._enabled_map())
+        self.assertFalse(os.path.isdir(path))
+
+    def test_delete_module_refuses_a_running_one(self):
+        self.manager.load("actor")
+        with self.assertRaises(RuntimeError) as ctx:
+            self.manager.delete_module("actor")
+        self.assertIn("还在运行", str(ctx.exception))
+
     def test_meta_has_name_and_version(self):
         meta = self.manager.meta("dummy")
         self.assertEqual(meta["name"], "哑模块")
@@ -443,26 +463,6 @@ class BindingProfileCheckTests(unittest.TestCase):
             if os.path.exists(path):
                 os.remove(path)
 
-    def test_control_page_binding_writes_persist(self):
-        """控制页写绑定必须落盘：存储层读出的临时字典不能写完就扔。"""
-        from ui import control_page as cp
-
-        page = cp.ControlPage.__new__(cp.ControlPage)
-
-        class _Shell:
-            pass
-
-        shell = _Shell()
-        shell.engine = self.engine
-        page.shell = shell
-        page._write_binding(13, "osc:/avatar/parameters/Trigger")
-        active, profiles = self.engine.binding_profiles()
-        self.assertEqual(profiles[active].get("13"),
-                         "osc:/avatar/parameters/Trigger")
-        page._write_binding(13, "key:F5")
-        _active, profiles = self.engine.binding_profiles()
-        self.assertEqual(profiles[active].get("13"), "key:F5")
-
     def test_missing_detection_without_loaded_module(self):
         missing = self.engine.binding_missing_modules({
             "13": "osc:/avatar/parameters/X",
@@ -595,6 +595,36 @@ class FlowyModule:
         self.assertEqual(active2, "默认")
         self.assertEqual(sorted(profiles2), ["默认", "默认接线"])
 
+    def test_reload_keeps_user_layout_of_injected_profile(self):
+        """整理过的默认配置要活过重启：装载时不能把模块自带坐标又盖回去。
+
+        重启走的是「新建管理器再装载」，不是停用——停用会真的收回注入。
+        """
+        self._write_profile_module("0.1.0", 42.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        active, profiles = self.EF.load_profiles(self.flow_dir)
+        node = profiles["默认接线"][self.EF.PAGE_INPUT].nodes[0]
+        node.x, node.y = 640.0, 220.0          # 用户在画布上整理过
+        self.EF.save_profiles(active, profiles, self.flow_dir)
+
+        self.manager = PluginManager(self.engine)
+        self.manager.discover()
+        self.manager.load("flowy")
+        _active, again = self.EF.load_profiles(self.flow_dir)
+        moved = again["默认接线"][self.EF.PAGE_INPUT].nodes[0]
+        self.assertEqual((moved.x, moved.y), (640.0, 220.0),
+                         "同版本再装载不该重置用户整理好的坐标")
+
+        # 模块升级是另一回事：新版本自带的默认配置就该刷新自己注入过的那份。
+        self._write_profile_module("0.2.0", 43.0)
+        self.manager = PluginManager(self.engine)
+        self.manager.discover()
+        self.manager.load("flowy")
+        _active, upgraded = self.EF.load_profiles(self.flow_dir)
+        row = upgraded["默认接线"][self.EF.PAGE_INPUT].nodes[0]
+        self.assertAlmostEqual(row.params["v"], 43.0)
+
     def test_same_name_user_profile_is_never_clobbered(self):
         graphs = {page: self.EF.FlowGraph(page) for page in self.EF.PAGES}
         self.EF.save_profiles("默认", {"默认": graphs, "默认接线": graphs},
@@ -618,6 +648,9 @@ class FlowyModule:
         os.remove(os.path.join(self.flow_dir, "默认接线.json"))
         os.remove(os.path.join(self.bind_dir, "默认按键.json"))
         self.assertEqual(list(self.EF.load_profiles(self.flow_dir)[1]), ["默认"])
+        self.assertEqual(self.manager.default_profiles("flowy"),
+                         {"flow": ["默认接线"], "bindings": ["默认按键"]},
+                         "模块卡要能列出自带哪几套默认配置")
         notes = self.manager.apply_module_default_profiles("flowy")
         self.assertTrue(any("默认接线" in n for n in notes), notes)
         self.assertTrue(any("默认按键" in n for n in notes), notes)
@@ -629,10 +662,44 @@ class FlowyModule:
         self.assertEqual(bind_active, "默认按键")
         self.assertEqual(binds["默认按键"], {"13": "fire"})
 
-    def test_uninstall_removes_injected_profiles_and_clears_marker(self):
-        """卸载时默认配置移出可选列表，正在用的自动切回「默认」。
+    def test_apply_defaults_on_already_active_profile_is_not_a_restart(self):
+        """当前配置正好是模块默认那份时，别报「重启后生效」。
 
-        只是停用（卸载实例）不动配置：配置跟「安装」这一生命周期走。
+        switch_profile 对「已经是这一份」返回 False，界面据此提示重启，
+        用户点完「一键套用」看着就像按钮坏了。
+        """
+        class _Runtime:
+            def __init__(self, flow_dir):
+                self.flow_dir = flow_dir
+                self.active = "默认接线"
+                self.profiles = {}
+
+        class _Host:
+            def __init__(self, runtime):
+                self.runtime = runtime
+
+            def switch_profile(self, name):
+                if name not in self.runtime.profiles or name == self.runtime.active:
+                    return False
+                self.runtime.active = name
+                return True
+
+        self._write_profile_module("0.1.0", 42.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        runtime = _Runtime(self.flow_dir)
+        self.engine.flow = _Host(runtime)
+        notes = self.manager.apply_module_default_profiles("flowy")
+        self.assertTrue(any("默认接线" in n for n in notes), notes)
+        self.assertFalse(any("重启后生效" in n for n in notes),
+                         "已经是当前配置也算套用成功，不该提示重启")
+        self.assertEqual(runtime.active, "默认接线")
+
+    def test_uninstall_removes_injected_profiles_and_clears_marker(self):
+        """停用与卸载都把默认配置移出可选列表，正在用的自动切回「默认」。
+
+        原版就是「启用注入、停止清除」：模块不跑了还留着它的配置档，事件流与
+        按键映射下拉会列出一堆引用不到动作的幽灵选项。
         """
         import asyncio
         self._write_profile_module("0.1.0", 42.0)
@@ -644,23 +711,41 @@ class FlowyModule:
         self.assertEqual(active, "默认接线")
         bind_active, binds = self.bs.load_binding_profiles(self.bind_dir)
         self.assertEqual(bind_active, "默认按键")
-        # 停用不移除：配置跟安装走
+        # 停用即清除注入
         asyncio.run(self.manager.unload("flowy"))
-        self.assertIn("默认接线", self.EF.load_profiles(self.flow_dir)[1])
-        # 卸载才移除
-        asyncio.run(self.manager.uninstall("flowy"))
         active, profiles = self.EF.load_profiles(self.flow_dir)
         self.assertNotIn("默认接线", profiles)
         self.assertEqual(active, "默认")
         bind_active, binds = self.bs.load_binding_profiles(self.bind_dir)
         self.assertNotIn("默认按键", binds)
         self.assertEqual(bind_active, "默认")
+        # 卸载同样收干净（此时已无注入，不该报错）
+        asyncio.run(self.manager.uninstall("flowy"))
+        self.assertNotIn("默认接线", self.EF.load_profiles(self.flow_dir)[1])
         # 注入标记已清：重新装载会重新注入
         self.assertNotIn("_injected_profiles",
                          self.manager.settings_for("flowy"))
         self.manager.load("flowy")
         _active, profiles = self.EF.load_profiles(self.flow_dir)
         self.assertIn("默认接线", profiles)
+
+    def test_deactivate_clears_injected_profiles(self):
+        """界面「停用」这条路（deactivate）也要收回注入的配置档。
+
+        启用会注入、停用不清，等于每关一次模块就在配置下拉里留一份幽灵选项。
+        """
+        import asyncio
+        self._write_profile_module("0.1.0", 42.0)
+        self.manager.discover()
+        self.manager.load("flowy")
+        self.manager.apply_module_default_profiles("flowy")
+        self.assertEqual(self.EF.load_profiles(self.flow_dir)[0], "默认接线")
+        asyncio.run(self.manager.deactivate("flowy"))
+        self.assertNotIn("默认接线", self.EF.load_profiles(self.flow_dir)[1])
+        self.assertEqual(self.EF.load_profiles(self.flow_dir)[0], "默认")
+        self.assertNotIn("默认按键", self.bs.load_binding_profiles(self.bind_dir)[1])
+        self.assertFalse(self.manager.is_enabled("flowy"))
+        self.assertIsNone(self.manager.instance("flowy"))
 
     def test_inject_recovers_after_config_wipe(self):
         """配置文件夹被清空后标记仍在：再装载必须照样补注，不能按版本早退。"""
@@ -1080,6 +1165,225 @@ class LegacyPurgeTests(unittest.TestCase):
                          [("in", "in_fire"), ("out", "COYOTE.Battery")])
         self.assertTrue(any("已下线核心参数" in m
                             for m in self.engine._logs))
+
+
+def _connected_state():
+    """一台真的连上的负鼠：connected + paired 同时为直才算「设备在场」。"""
+    from dglab.state import EngineState, Slot
+
+    return EngineState(
+        backend="socket_v4", connected=True, paired=True,
+        slots={"1": Slot(slot_id="1", type="COYOTE", battery=72)})
+
+
+def _bare_state():
+    """槽位里还留着历史设备，但链路已经断了。"""
+    from dglab.state import EngineState, Slot
+
+    return EngineState(
+        backend="socket_v4", connected=False, paired=False,
+        slots={"1": Slot(slot_id="1", type="COYOTE", battery=72)})
+
+
+class OscCustomParamTests(unittest.TestCase):
+    """「自定义 OSC 参数」：填一条完整地址就建立变量，事件流能读能写。"""
+
+    def _settings(self, rows):
+        cfg = _FakeConfig(os.path.join(tempfile.gettempdir(), "dgstudio_osc_custom.json"))
+        cfg["prefix"] = "DGLab"
+        # 真配置里这一项来自设置项默认值：没有它，设备参数名会按家族自己拼出来。
+        cfg.setdefault("device_prefixes",
+                       {"COYOTE": "DGLab", "OVC": "DGLabOvc", "BMTR": "DGLabBmtr"})
+        cfg["custom_params"] = rows
+        return cfg
+
+    def test_rows_normalise_and_bad_addresses_drop(self):
+        from modules.osc_bridge.plugin import _custom_rows
+
+        rows = _custom_rows(self._settings([
+            {"address": "/avatar/parameters/MyParam", "dir": "out", "type": "Int"},
+            {"address": "custom/Param"},
+            {"address": "dglab/bad name", "dir": "in"},
+            {"address": "/bad//path", "dir": "in"},
+            {"address": "", "dir": "out"},
+            "not-a-row",
+        ]))
+        self.assertEqual(sorted(rows), ["avatar/parameters/MyParam", "custom/Param"])
+        self.assertEqual(rows["avatar/parameters/MyParam"]["dir"], "out")
+        self.assertEqual(rows["avatar/parameters/MyParam"]["type"], "Int")
+        # 没写方向的按「收发」，没写类型的按浮点
+        self.assertEqual(rows["custom/Param"]["dir"], "inout")
+        self.assertEqual(rows["custom/Param"]["type"], "Float")
+
+    def test_link_params_registers_custom_rows(self):
+        from modules.osc_bridge.plugin import OscModule
+
+        mod = OscModule()
+        mod.bridge = SimpleNamespace(
+            get_state=lambda: (_ for _ in ()).throw(RuntimeError("无设备")),
+            param_names=lambda: ["avatar/parameters/Heard"],
+        )
+        mod.ctx = SimpleNamespace(
+            settings=self._settings([
+                {"address": "/avatar/parameters/MyParam", "dir": "out", "type": "Int"}]),
+            engine=SimpleNamespace(get_state=lambda: None),
+            log=lambda *_: None)
+        by_name = {row["name"]: row for row in mod.link_params()}
+        self.assertIn("avatar/parameters/MyParam", by_name,
+                      "自定义地址要进宿主变量登记，才能在事件流建卡")
+        self.assertEqual(by_name["avatar/parameters/MyParam"]["dir"], "out")
+        self.assertTrue(by_name["avatar/parameters/MyParam"]["renamable"])
+        # 收包遇到的未登记地址不再自动铺一行：要当变量用就得先登记。
+        self.assertNotIn("avatar/parameters/Heard", by_name)
+
+    def _module(self, rows, state):
+        from modules.osc_bridge.plugin import OscModule
+
+        mod = OscModule()
+        mod.bridge = None
+        mod.ctx = SimpleNamespace(
+            settings=self._settings(rows),
+            engine=SimpleNamespace(get_state=lambda: state),
+            log=lambda *_: None)
+        return mod
+
+    def test_registered_rows_follow_the_connected_device(self):
+        """设备参数按当前在连设备现算：连上才有行，断了就收回。"""
+        mod = self._module([], _connected_state())
+        by_name = {row["name"]: row for row in mod.link_params()}
+        self.assertIn("avatar/parameters/DGLabStrengthA", by_name)
+        self.assertIn("DGLab/Action", by_name)
+        self.assertTrue(all(row["renamable"] for row in by_name.values()),
+                        "登记行都要能改名，改名才改得出收发地址")
+        # temp_specs 是同一份表，只是换成宿主卸载时清残值用的 key 形状
+        self.assertEqual({s["key"] for s in mod.temp_specs()}, set(by_name))
+        self.assertEqual(self._module([], _bare_state()).link_params(), [],
+                         "设备不在场就不登记：变量表里不留拿不到值的行")
+
+    def test_device_rows_do_not_shadow_custom_rows(self):
+        """同名时设备登记行优先，自定义那行不再另造一份。"""
+        mod = self._module([
+            {"address": "/avatar/parameters/DGLabStrengthA", "dir": "in",
+             "type": "Float"}], _connected_state())
+        by_name = {row["name"]: row for row in mod.link_params()}
+        self.assertEqual(by_name["avatar/parameters/DGLabStrengthA"]["dir"],
+                         "inout")
+        self.assertNotIn("自定义", by_name["avatar/parameters/DGLabStrengthA"]["label"],
+                         "同名时以设备登记那行为准，别出现两条读不出的地址")
+
+    def test_derived_rows_are_the_config_page_table(self):
+        """配置页「设备 OSC 参数」那一栏：带键名与读写类型，界面按它只让改名。"""
+        mod = self._module([], _connected_state())
+        rows = mod.derived_rows()["device_params"]
+        self.assertTrue(rows)
+        self.assertTrue(all({"key", "address", "dir", "type", "label"} == set(r)
+                            for r in rows))
+        strength = [r for r in rows if r["address"].endswith("StrengthA")]
+        self.assertEqual([(r["dir"], r["key"]) for r in strength],
+                         [("inout", "in_strength_a")],
+                         "既下发又回读的参数记成读写，一行只管一个键")
+        self.assertEqual(self._module([], _bare_state()).derived_rows(),
+                         {"device_params": []})
+        # 不落盘：表读的是现算结果，配置文件里不该出现这一项
+        self.assertNotIn("device_params", self._settings([]))
+
+    def test_rename_from_the_config_page_moves_both_keys(self):
+        """在配置页改名 = 走引擎那条改名：两个同名键一起换，表也立刻跟着新名字。"""
+        mod = self._module([], _connected_state())
+        old = "avatar/parameters/DGLabStrengthA"
+        new = "avatar/parameters/MyStrengthA"
+        self.assertEqual(mod.rename_var(old, new), "")
+        table = mod.ctx.settings["param_names"]
+        self.assertEqual(table.get("in_strength_a"), "MyStrengthA",
+                         "下发那一路要跟着换地址")
+        self.assertEqual(table.get("COYOTE.StrengthA"), "MyStrengthA",
+                         "回读那一路也要跟着换，不然收发两套名字")
+        self.assertEqual([r["address"] for r in mod.derived_rows()["device_params"]
+                          if r["address"].endswith("StrengthA")], [new])
+        self.assertIn(new, {row["name"] for row in mod.link_params()})
+
+    def test_rename_rejects_bad_or_taken_name(self):
+        mod = self._module([], _connected_state())
+        taken = "avatar/parameters/DGLabBattery"
+        self.assertIn("已被其它 OSC 参数占用",
+                      mod.rename_var("avatar/parameters/DGLabStrengthA", taken))
+        self.assertIn("字母开头",
+                      mod.rename_var("avatar/parameters/DGLabStrengthA",
+                                     "avatar/parameters/9bad"))
+        self.assertEqual(mod.ctx.settings.get("param_names") or {}, {},
+                         "两次失败的改名都不该留下覆盖")
+        self.assertIn("avatar/parameters/DGLabStrengthA",
+                      {r["address"] for r in mod.derived_rows()["device_params"]},
+                      "失败之后表里还是原来那个地址")
+
+    def test_lifecycle_hooks_do_not_write_a_second_table(self):
+        """设备变化 / 重新加载这两个钩子只通知界面，不再往配置里写登记副本。"""
+        import asyncio
+
+        from modules.osc_bridge.plugin import OscModule
+
+        cfg = self._settings([])
+        emitted: list[str] = []
+        mod = OscModule()
+        mod.ctx = SimpleNamespace(
+            settings=cfg,
+            engine=SimpleNamespace(get_state=lambda: _connected_state()),
+            events=SimpleNamespace(emit=lambda kind, *a: emitted.append(kind)),
+            log=lambda *_: None)
+        mod.bridge = None
+        mod._on_devices_changed(_connected_state())
+        self.assertEqual(emitted, ["modules_changed"],
+                         "设备一连上要让界面重取那张现算的表，别的都不做")
+        self.assertNotIn("device_params", cfg,
+                         "设备参数不落配置文件：存下来就是会过期的第二份状态")
+        asyncio.run(mod.reload_config())     # 桥没起来也要能走通，别按 NameError 挂掉
+
+    def test_push_values_honours_custom_direction_and_type(self):
+        from modules.osc_bridge.bridge import OscBridge, OscConfig
+        from modules.osc_bridge.plugin import OSC_CONFIG_DEFAULTS
+
+        bridge = OscBridge(OscConfig(
+            {"custom_params": [
+                {"address": "avatar/parameters/OnlyIn", "dir": "in", "type": "Float"},
+                {"address": "avatar/parameters/Count", "dir": "out", "type": "Int"},
+            ]}, defaults=OSC_CONFIG_DEFAULTS), lambda: None)
+        sent: list[tuple] = []
+        bridge.send_value = lambda addr, value: sent.append((addr, value))
+        bridge.engine.temps.update({
+            "avatar/parameters/OnlyIn": 3.0,
+            "avatar/parameters/Count": 2.0,
+            "avatar/parameters/Plain": 1.5,
+        })
+        bridge._push_values()
+        out = dict(sent)
+        self.assertNotIn("/avatar/parameters/OnlyIn", out,
+                         "只收的地址不该回头发给 VRChat")
+        # pythonosc 按实参类型打标签，声明整数的要发成 int
+        self.assertEqual(out["/avatar/parameters/Count"], 2)
+        self.assertEqual(out["/avatar/parameters/Plain"], 1.5)
+        bridge.close()
+
+    def test_rename_custom_row_writes_back_the_table(self):
+        from modules.osc_bridge.plugin import _rename_custom
+
+        settings = self._settings([
+            {"address": "/avatar/parameters/Old", "dir": "out", "type": "Float"},
+            {"address": "avatar/parameters/Other", "dir": "in"},
+        ])
+        self.assertEqual(_rename_custom(settings, "avatar/parameters/Old",
+                                        "/avatar/parameters/New"), "")
+        addresses = [r["address"] for r in settings["custom_params"]]
+        self.assertIn("avatar/parameters/New", addresses)
+        self.assertNotIn("/avatar/parameters/Old", addresses)
+        self.assertTrue(settings.saved, "改名要落盘")
+        # 非自定义行返回 None：交给内置参数的改名流程
+        self.assertIsNone(_rename_custom(settings, "avatar/parameters/Action", "x"))
+        self.assertEqual(
+            _rename_custom(settings, "avatar/parameters/New", "avatar/parameters/Other"),
+            "「avatar/parameters/Other」已在自定义参数里，换一个地址")
+        self.assertEqual(
+            _rename_custom(settings, "avatar/parameters/New", "bad name"),
+            "OSC 地址要按 头像/参数/名字 那样分段，每段字母开头，可用字母 / 数字 / 下划线")
 
 
 if __name__ == "__main__":
